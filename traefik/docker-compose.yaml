@@ -1,0 +1,30 @@
+services:
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    environment:
+      - DOCKER_API_VERSION=1.41
+      - TZ=Europe/Helsinki
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Load the dynamic file config for SSL
+      - "--providers.file.filename=/etc/traefik/dynamic_conf.yaml"
+      - "--providers.file.watch=true"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080" # Dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./certs:/etc/traefik/certs:ro
+      - ./dynamic_conf.yaml:/etc/traefik/dynamic_conf.yaml:ro
+    networks:
+      - web-proxy
+
+networks:
+  web-proxy:
+    external: true

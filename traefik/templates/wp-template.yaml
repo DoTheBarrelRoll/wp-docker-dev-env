@@ -1,0 +1,100 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ${SITE_NAME}-db
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: wordpress
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - wp-internal
+    restart: always
+
+  wordpress:
+    image: wordpress:fpm
+    container_name: ${SITE_NAME}-app
+    depends_on:
+      - mysql
+    environment:
+      WORDPRESS_DB_HOST: mysql
+      WORDPRESS_DB_USER: root
+      WORDPRESS_DB_PASSWORD: rootpassword
+      WORDPRESS_CONFIG_EXTRA: |
+        define('FS_METHOD', 'direct');
+    volumes:
+      - ./src:/var/www/html # Changed to subfolder
+    networks:
+      - wp-internal
+    restart: always
+
+  nginx:
+    image: nginx:alpine
+    container_name: ${SITE_NAME}-nginx
+    depends_on:
+      - wordpress
+    volumes:
+      - ./src:/var/www/html # Changed to subfolder
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${SITE_NAME}.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.${SITE_NAME}.entrypoints=websecure"
+      - "traefik.http.routers.${SITE_NAME}.tls=true"
+      - "traefik.http.services.${SITE_NAME}.loadbalancer.server.port=80"
+      - "traefik.docker.network=web-proxy"
+    networks:
+      - wp-internal
+      - web-proxy
+    restart: always
+
+  wp-setup:
+    image: wordpress:cli
+    container_name: ${SITE_NAME}-setup
+    user: root
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./src:/var/www/html # Changed to subfolder
+    networks:
+      - wp-internal
+      - web-proxy
+    environment:
+      WORDPRESS_DB_HOST: mysql
+      WORDPRESS_DB_USER: root
+      WORDPRESS_DB_PASSWORD: rootpassword
+      PHP_OPTIONS: "-d memory_limit=512M"
+      WP_CLI_CACHE_DIR: "/tmp/wp-cli-cache"
+    command: >
+      /bin/sh -c "
+      sleep 20;
+      if [ ! -f wp-load.php ]; then
+        echo 'Downloading WordPress...';
+        wp core download --force --skip-content --allow-root;
+      fi;
+      if [ ! -f wp-config.php ]; then
+        echo 'Creating config...';
+        wp config create --dbhost=mysql --dbname=wordpress --dbuser=root --dbpass=rootpassword --force --allow-root;
+      fi;
+      if ! wp core is-installed --allow-root; then
+        echo 'Installing WordPress...';
+        wp core install --url=https://${DOMAIN} --title='${SITE_NAME} Local' --admin_user=admin --admin_password=password --admin_email=admin@${DOMAIN} --skip-email --allow-root;
+      else
+        echo 'WordPress is already installed.';
+      fi;
+      chown -R 1000:33 /var/www/html;
+      chmod -R 775 /var/www/html/wp-content;
+      tail -f /dev/null;
+      "
+    depends_on:
+      - mysql
+      - wordpress
+
+networks:
+  wp-internal:
+  web-proxy:
+    external: true
+
+volumes:
+  db_data:
+    name: ${SITE_NAME}_db_data

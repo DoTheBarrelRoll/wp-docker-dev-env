@@ -1,0 +1,5 @@
+# Ignore every subfolder except traefik
+*/
+*.pem
+!traefik/
+traefik/dynamic_conf.yaml
