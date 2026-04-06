@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Configuration
-BASE_DIR="/home/miikka/dev"
+# Base dir is the current directory where the script is located, you can change it to your desired path
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRAEFIK_DIR="$BASE_DIR/traefik"
 CERT_DIR="$TRAEFIK_DIR/certs"
 TEMPLATE="$TRAEFIK_DIR/templates/wp-template.yaml"
@@ -12,13 +13,13 @@ export UID=$(id -u)
 export GID=$(id -g)
 
 # Get inputs
-read -p "Enter project folder name (e.g., my-blog): " SITE_NAME
+read -p "Enter project directory name (e.g., my-blog): " SITE_NAME
 read -p "Enter domain (e.g., myblog.dev): " DOMAIN
 
 PROJECT_DIR="$BASE_DIR/$SITE_NAME"
 
 echo "--- Creating project directory ---"
-mkdir -p "$PROJECT_DIR/wp-content"
+mkdir -p "$PROJECT_DIR/src"
 
 echo "--- Generating SSL Certificates ---"
 mkcert -cert-file "$CERT_DIR/$SITE_NAME-cert.pem" -key-file "$CERT_DIR/$SITE_NAME-key.pem" "$DOMAIN" "*.$DOMAIN"
@@ -40,9 +41,24 @@ echo "--- Copying over nginx.conf ---"
 mkdir -p "$PROJECT_DIR/nginx"
 sed -e "s/\${DOMAIN}/$DOMAIN/g" "$NGINX_CONF" > "$PROJECT_DIR/nginx/nginx.conf"
 
+echo "--- Installing Plugins via Composer ---"
+# 1. Prepare composer.json
+sed -e "s/\${SITE_NAME}/$SITE_NAME/g" "$TRAEFIK_DIR/templates/composer.json" > "$PROJECT_DIR/src/composer.json"
+
+# 2. Check if auth.json exists before proceeding with installation
+if [ -f "$TRAEFIK_DIR/templates/auth.json" ]; then
+    echo "Found auth.json, proceeding with composer install..."
+    cp "$TRAEFIK_DIR/templates/auth.json" "$PROJECT_DIR/src/auth.json"
+    
+    # Run composer install now that credentials are in place
+    cd "$PROJECT_DIR/src" && composer install --no-dev --optimize-autoloader
+else
+    echo "Notice: auth.json not found in $TRAEFIK_DIR/templates/. Skipping composer install."
+fi
+
 echo "--- Setting permissions ---"
-mkdir -p "$PROJECT_DIR/wp-content"
-chmod -R 775 "$PROJECT_DIR/wp-content"
+mkdir -p "$PROJECT_DIR/src/wp-content"
+chmod -R 775 "$PROJECT_DIR/src/wp-content"
 
 echo "--- Starting the container ---"
 cd "$PROJECT_DIR" && docker compose up -d

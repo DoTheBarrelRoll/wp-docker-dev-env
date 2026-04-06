@@ -1,0 +1,13 @@
+{
+    "name": "${SITE_NAME}/wordpress",
+    "description": "WP Migrate DB Pro for WordPress site",
+    "repositories": [
+        {
+            "type": "composer",
+            "url": "https://composer.deliciousbrains.com"
+        }
+    ],
+    "require": {
+        "deliciousbrains-plugin/wp-migrate-db-pro": "^2"
+    }
+}

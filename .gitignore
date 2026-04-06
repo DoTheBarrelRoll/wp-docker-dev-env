@@ -1,5 +1,7 @@
 # Ignore every subfolder except traefik
 */
 *.pem
+auth.json
 !traefik/
+!traefik/templates/
 traefik/dynamic_conf.yaml
