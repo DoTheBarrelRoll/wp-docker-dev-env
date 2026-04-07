@@ -64,6 +64,7 @@ echo "--- Starting the container ---"
 cd "$PROJECT_DIR" && docker compose up -d
 
 echo "--- Done! ---"
+echo "WordPress takes about 20 seconds to start up. You can check the logs with 'docker compose logs -f' in the project directory."
 echo "Next steps:"
 echo "1. Add '127.0.0.1 $DOMAIN' to your /etc/hosts file."
 echo "2. Visit https://$DOMAIN"

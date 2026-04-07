@@ -24,7 +24,7 @@ This environment automates the creation of high-performance WordPress instances 
 ## 📋 Prerequisites
 
 - **Docker & Docker Compose**
-- **mkcert** (Run `mkcert -install` once after installing)
+- **mkcert** - Platform specific instructions can be found [here](https://github.com/filosottile/mkcert?tab=readme-ov-file#installation)
 
 ## 🚀 Installation & Usage
 
@@ -46,7 +46,18 @@ cp dynamic_conf.yaml.example dynamic_conf.yaml
 docker compose up -d
 ```
 
-### 3. Create a New Site
+### 3. Add auth.json for WP DB Migrate (optional)
+
+The start script utilizes Composer to automatically install WP DB Migrate if auth.json is present.
+Start by copying the example file into the proper JSON
+
+```sh
+cp auth.json.example auth.json
+```
+
+Then fill in the details, Composer API keys can be created [here](https://deliciousbrains.com/my-account/settings/)
+
+### 4. Create a New Site
 
 Run the automation script from the root directory:
 
@@ -63,7 +74,7 @@ Run the automation script from the root directory:
 5.  Generate a local `docker-compose.yaml` and `nginx/nginx.conf` using templates.
 6.  Start your new WordPress site.
 
-### 4. Final Step: Hosts File
+### 5. Final Step: Hosts File
 
 Add your custom domain to your system hosts file:
 

@@ -2,6 +2,7 @@ services:
   traefik:
     image: traefik:latest
     container_name: traefik
+    restart: always
     environment:
       - DOCKER_API_VERSION=1.41
       - TZ=Europe/Helsinki

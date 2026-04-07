@@ -82,6 +82,9 @@ services:
       else
         echo 'WordPress is already installed.';
       fi;
+      if wp plugin is-installed wp-migrate-db-pro --allow-root; then
+        wp plugin activate wp-migrate-db-pro --allow-root;
+      fi;
       chown -R 1000:33 /var/www/html;
       chmod -R 775 /var/www/html/wp-content;
       tail -f /dev/null;
