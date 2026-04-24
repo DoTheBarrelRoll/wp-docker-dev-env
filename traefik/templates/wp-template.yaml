@@ -9,7 +9,7 @@ services:
       - db_data:/var/lib/mysql
     networks:
       - wp-internal
-    restart: always
+    restart: no
 
   wordpress:
     image: wordpress:fpm
@@ -26,7 +26,7 @@ services:
       - ./src:/var/www/html # Changed to subfolder
     networks:
       - wp-internal
-    restart: always
+    restart: no
 
   nginx:
     image: nginx:alpine
@@ -46,16 +46,17 @@ services:
     networks:
       - wp-internal
       - web-proxy
-    restart: always
+    restart: no
 
   wp-setup:
     image: wordpress:cli
     container_name: ${SITE_NAME}-setup
-    user: root
+    # Use the www-data UID and GID
+    user: "33:33"
     stdin_open: true
     tty: true
     volumes:
-      - ./src:/var/www/html # Changed to subfolder
+      - ./src:/var/www/html
     networks:
       - wp-internal
       - web-proxy
@@ -70,25 +71,46 @@ services:
       sleep 20;
       if [ ! -f wp-load.php ]; then
         echo 'Downloading WordPress...';
-        wp core download --force --skip-content --allow-root;
+        wp core download --force --skip-content;
       fi;
       if [ ! -f wp-config.php ]; then
         echo 'Creating config...';
-        wp config create --dbhost=mysql --dbname=wordpress --dbuser=root --dbpass=rootpassword --force --allow-root;
+        wp config create --dbhost=mysql --dbname=wordpress --dbuser=root --dbpass=rootpassword --force;
       fi;
-      if ! wp core is-installed --allow-root; then
+      if ! wp core is-installed; then
         echo 'Installing WordPress...';
-        wp core install --url=https://${DOMAIN} --title='${SITE_NAME} Local' --admin_user=admin --admin_password=password --admin_email=admin@${DOMAIN} --skip-email --allow-root;
+        wp core install --url=https://${DOMAIN} --title='${SITE_NAME} Local' --admin_user=admin --admin_password=password --admin_email=admin@${DOMAIN} --skip-email;
       else
         echo 'WordPress is already installed.';
       fi;
-      if wp plugin is-installed wp-migrate-db-pro --allow-root; then
-        wp plugin activate wp-migrate-db-pro --allow-root;
+      if wp plugin is-installed wp-migrate-db-pro; then
+        wp plugin activate wp-migrate-db-pro;
       fi;
-      chown -R 1000:33 /var/www/html;
-      chmod -R 775 /var/www/html/wp-content;
+      # Note: We removed chown/chmod from here because a non-root user cannot change file ownership
       tail -f /dev/null;
       "
+    depends_on:
+      - mysql
+      - wordpress
+
+  wp-cli:
+    image: wordpress:cli
+    container_name: ${SITE_NAME}-cli
+    # Use the www-data UID and GID
+    user: "33:33"
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./src:/var/www/html
+    networks:
+      - wp-internal
+      - web-proxy
+    environment:
+      WORDPRESS_DB_HOST: mysql
+      WORDPRESS_DB_USER: root
+      WORDPRESS_DB_PASSWORD: rootpassword
+      PHP_OPTIONS: "-d memory_limit=512M"
+      WP_CLI_CACHE_DIR: "/tmp/wp-cli-cache"
     depends_on:
       - mysql
       - wordpress

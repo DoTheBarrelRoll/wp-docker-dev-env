@@ -21,6 +21,9 @@ PROJECT_DIR="$BASE_DIR/$SITE_NAME"
 echo "--- Creating project directory ---"
 mkdir -p "$PROJECT_DIR/src"
 
+sudo chown -R $USER:33 "$PROJECT_DIR"
+sudo chmod -R 775 "$PROJECT_DIR"
+
 echo "--- Generating SSL Certificates ---"
 mkcert -cert-file "$CERT_DIR/$SITE_NAME-cert.pem" -key-file "$CERT_DIR/$SITE_NAME-key.pem" "$DOMAIN" "*.$DOMAIN"
 
@@ -62,6 +65,12 @@ chmod -R 775 "$PROJECT_DIR/src/wp-content"
 
 echo "--- Starting the container ---"
 cd "$PROJECT_DIR" && docker compose up -d
+
+# Give the setup container a moment to breathe and create files
+echo "--- Finalizing permissions on generated files ---"
+sudo chown -R $USER:33 "$PROJECT_DIR/src"
+sudo find "$PROJECT_DIR/src" -type d -exec chmod 2775 {} +
+sudo find "$PROJECT_DIR/src" -type f -exec chmod 0664 {} +
 
 echo "--- Done! ---"
 echo "WordPress takes about 20 seconds to start up. You can check the logs with 'docker compose logs -f' in the project directory."
