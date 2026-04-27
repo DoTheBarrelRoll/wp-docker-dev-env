@@ -8,6 +8,7 @@ CERT_DIR="$TRAEFIK_DIR/certs"
 TEMPLATE="$TRAEFIK_DIR/templates/wp-template.yaml"
 DYNAMIC_CONF="$TRAEFIK_DIR/dynamic_conf.yaml"
 NGINX_CONF="$TRAEFIK_DIR/templates/nginx.conf"
+UPLOADS_INCLUDE=""
 
 export UID=$(id -u)
 export GID=$(id -g)
@@ -15,6 +16,8 @@ export GID=$(id -g)
 # Get inputs
 read -p "Enter project directory name (e.g., my-blog): " SITE_NAME
 read -p "Enter domain (e.g., myblog.dev): " DOMAIN
+read -p "Enter production URL (optional, leave blank to skip): " PROD_URL
+
 
 PROJECT_DIR="$BASE_DIR/$SITE_NAME"
 
@@ -23,6 +26,26 @@ mkdir -p "$PROJECT_DIR/src"
 
 sudo chown -R $USER:33 "$PROJECT_DIR"
 sudo chmod -R 775 "$PROJECT_DIR"
+
+echo "--- Generating nginx.conf ---"
+mkdir -p "$PROJECT_DIR/nginx"
+mkdir -p "$PROJECT_DIR/nginx/configs"
+
+
+if [ -n "$PROD_URL" ]; then
+    echo "--- Generating uploads-proxy.conf ---"
+    # Use | as delimiter instead of / to avoid path issues
+    sed -e "s|\${PROD_URL}|$PROD_URL|g" "$TRAEFIK_DIR/templates/uploads-proxy.conf" > "$PROJECT_DIR/nginx/configs/uploads-proxy.conf"
+    
+    # Define the include directive
+    UPLOADS_INCLUDE="include /etc/nginx/custom_includes/uploads-proxy.conf;"
+fi
+
+
+# We inject the include directive (or nothing) into the nginx.conf template
+sed -e "s|\${DOMAIN}|$DOMAIN|g" \
+    -e "s|\${UPLOADS_INCLUDE}|$UPLOADS_INCLUDE|g" \
+    "$NGINX_CONF" > "$PROJECT_DIR/nginx/nginx.conf"
 
 echo "--- Generating SSL Certificates ---"
 mkcert -cert-file "$CERT_DIR/$SITE_NAME-cert.pem" -key-file "$CERT_DIR/$SITE_NAME-key.pem" "$DOMAIN" "*.$DOMAIN"
@@ -40,9 +63,6 @@ echo "--- Generating docker-compose.yaml ---"
 # Use sed to replace placeholders and save to new directory
 sed -e "s/\${SITE_NAME}/$SITE_NAME/g" -e "s/\${DOMAIN}/$DOMAIN/g" -e "s/\${UID}/$UID/g" -e "s/\${GID}/$GID/g" "$TEMPLATE" > "$PROJECT_DIR/docker-compose.yaml"
 
-echo "--- Copying over nginx.conf ---"
-mkdir -p "$PROJECT_DIR/nginx"
-sed -e "s/\${DOMAIN}/$DOMAIN/g" "$NGINX_CONF" > "$PROJECT_DIR/nginx/nginx.conf"
 
 echo "--- Installing Plugins via Composer ---"
 # 1. Prepare composer.json

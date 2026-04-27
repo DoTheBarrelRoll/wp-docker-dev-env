@@ -36,6 +36,7 @@ services:
     volumes:
       - ./src:/var/www/html # Changed to subfolder
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/configs:/etc/nginx/custom_includes:ro
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.${SITE_NAME}.rule=Host(`${DOMAIN}`)"
@@ -86,8 +87,6 @@ services:
       if wp plugin is-installed wp-migrate-db-pro; then
         wp plugin activate wp-migrate-db-pro;
       fi;
-      # Note: We removed chown/chmod from here because a non-root user cannot change file ownership
-      tail -f /dev/null;
       "
     depends_on:
       - mysql
