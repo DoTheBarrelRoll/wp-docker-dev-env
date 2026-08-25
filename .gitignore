@@ -1,7 +1,15 @@
-# Ignore every subfolder except traefik
-*/
+# Only the tooling is tracked. Every site directory is local to this machine.
+# The patterns are anchored to the repository root so that new files under
+# traefik/ stay tracked.
+/*/
+!/traefik/
+
+# Secrets and generated state
 *.pem
 auth.json
-!traefik/
-!traefik/templates/
-traefik/dynamic_conf.yaml
+/traefik/dynamic_conf.yaml
+/traefik/certs/*
+!/traefik/certs/.gitkeep
+
+# Local build artefacts
+*.zip
