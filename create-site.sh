@@ -81,6 +81,14 @@ if [ -n "$PROD_DOMAIN" ]; then
     [[ "$PROD_DOMAIN" =~ $HOSTNAME_RE ]] || die "'$PROD_DOMAIN' does not look like a hostname."
 fi
 
+THEME_SLUG=""
+read -r -p "Enter theme repository slug from github.com/redandbluefi (optional, e.g. eternia): " THEME_SLUG || true
+THEME_SLUG="${THEME_SLUG,,}"
+if [ -n "$THEME_SLUG" ]; then
+    [[ "$THEME_SLUG" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "'$THEME_SLUG' is not a valid repository slug."
+    [ -x "$BASE_DIR/setup-theme.sh" ] || die "setup-theme.sh is missing or not executable."
+fi
+
 PROJECT_DIR="$BASE_DIR/$SITE_NAME"
 if [ -e "$PROJECT_DIR" ]; then
     printf '\n%s already exists.\n' "$PROJECT_DIR"
@@ -172,7 +180,18 @@ fi
 info "Normalising ownership and permissions"
 sudo chown -R "$USER:$WWW_DATA_GID" "$PROJECT_DIR"
 sudo find "$PROJECT_DIR" -type d -exec chmod 2775 {} +
-sudo find "$PROJECT_DIR" -type f -exec chmod 0664 {} +
+# g+rw rather than an absolute mode, so executables in vendor/ and
+# node_modules/ keep their execute bit.
+sudo find "$PROJECT_DIR" -type f -exec chmod g+rw {} +
+
+theme_status=0
+if [ -n "$THEME_SLUG" ]; then
+    "$BASE_DIR/setup-theme.sh" "$SITE_NAME" "$THEME_SLUG" "$DOMAIN" || theme_status=$?
+    if [ "$theme_status" -ne 0 ]; then
+        printf '\nTheme setup failed with status %s. The site itself is running. Retry with:\n' "$theme_status"
+        printf '  ./setup-theme.sh %s %s\n' "$SITE_NAME" "$THEME_SLUG"
+    fi
+fi
 
 # --- Hosts file --------------------------------------------------------------
 
@@ -204,6 +223,11 @@ Logs       cd $SITE_NAME && docker compose logs -f
 Stop       cd $SITE_NAME && docker compose down
 Remove     ./delete-site.sh $SITE_NAME
 EOF
+
+if [ -n "$THEME_SLUG" ] && [ "$theme_status" -eq 0 ]; then
+    printf 'Theme      %s/src/wp-content/themes/%s\n' "$SITE_NAME" "$THEME_SLUG"
+    printf 'Watch      cd %s/src/wp-content/themes/%s && pnpm run dev\n' "$SITE_NAME" "$THEME_SLUG"
+fi
 
 if ! docker ps --format '{{.Names}}' | grep -qx traefik; then
     printf '\nWarning: the traefik container is not running, so the site is not reachable yet.\n'

@@ -7,6 +7,7 @@
 # Secrets and generated state
 *.pem
 auth.json
+licenses.env
 /traefik/dynamic_conf.yaml
 /traefik/certs/*
 !/traefik/certs/.gitkeep
