@@ -229,6 +229,19 @@ if [ -n "$(cd "$PROJECT_DIR" && docker compose ps --status running -q wordpress 
     site_running=1
 fi
 
+# ACF Pro has to be active before the theme is: the themes call get_field()
+# while WordPress loads, so activating the theme first fatals the site.
+ACF_PLUGIN="advanced-custom-fields-pro"
+acf_activated="no"
+if [ "$site_running" -eq 1 ] && [ -d "$PROJECT_DIR/src/wp-content/plugins/$ACF_PLUGIN" ]; then
+    info "Activating ACF Pro"
+    if wp_cli wp plugin activate "$ACF_PLUGIN"; then
+        acf_activated="yes"
+    else
+        warn "Could not activate $ACF_PLUGIN. A theme that calls ACF functions will fatal."
+    fi
+fi
+
 activated="no"
 if [ "$activate" -eq 0 ]; then
     warn "Not activating the theme, because $activate_reason. Activating it would take the site down."
@@ -272,4 +285,6 @@ if [ "$assets_built" = "no" ]; then
 fi
 if [ -z "$ACF_LICENSE" ]; then
     printf 'Plugins    NOT INSTALLED, no ACF Pro license in %s\n' "$LICENSES_FILE"
+elif [ "$acf_activated" = "yes" ]; then
+    printf 'Plugins    ACF Pro activated\n'
 fi
