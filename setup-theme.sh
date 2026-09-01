@@ -191,15 +191,27 @@ fi
 
 # --- Permissions -------------------------------------------------------------
 
-# We own everything we just cloned and built, so the group and modes can be
-# fixed without sudo as long as this account is in the web server group.
-# WordPress needs group write to save ACF field groups into the theme's
-# acf-json directory.
-info "Normalising theme file permissions"
-if ! { chgrp -R "$WWW_DATA_GID" "$THEME_DIR" \
-    && find "$THEME_DIR" -type d -exec chmod 2775 {} + \
-    && find "$THEME_DIR" -type f -exec chmod g+rw {} +; } 2>/dev/null; then
-    warn "Could not set group ownership on the theme. WordPress will not be able to write acf-json. Fix with: sudo chown -R $USER:$WWW_DATA_GID $THEME_DIR"
+# WordPress runs as www-data and has to be able to write here: to save ACF
+# field groups into the theme's acf-json, and to replace plugin directories
+# when WP Migrate pulls theme and plugin files. Composer extracts dist
+# archives with the modes stored in the archive, which leaves plugin
+# directories without group write, so this cannot be skipped.
+#
+# Only files this account owns are touched, so no sudo is needed and files
+# created by the containers are left alone. Modes are relative, so execute
+# bits and world-readability, which nginx needs, both survive.
+info "Normalising file permissions"
+normalise_failed=0
+for dir in "$THEME_DIR" \
+    "$PROJECT_DIR/src/wp-content/plugins" \
+    "$PROJECT_DIR/src/wp-content/mu-plugins"; do
+    [ -d "$dir" ] || continue
+    find "$dir" -user "$(id -u)" ! -group "$WWW_DATA_GID" -exec chgrp "$WWW_DATA_GID" {} + 2>/dev/null || normalise_failed=1
+    find "$dir" -user "$(id -u)" -type d -exec chmod g+rwxs {} + 2>/dev/null || normalise_failed=1
+    find "$dir" -user "$(id -u)" -type f -exec chmod g+rw {} + 2>/dev/null || normalise_failed=1
+done
+if [ "$normalise_failed" -ne 0 ]; then
+    warn "Could not set group permissions on every file. WordPress may fail to write acf-json or to replace plugins during a WP Migrate pull. Fix with: sudo chown -R $USER:$WWW_DATA_GID $PROJECT_DIR/src/wp-content"
 fi
 
 # --- Activate ----------------------------------------------------------------

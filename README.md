@@ -176,6 +176,13 @@ This stops the containers, deletes the database volume, removes the certificate 
 - **Traefik serves its own default certificate.** The site is missing from `traefik/dynamic_conf.yaml`. Traefik watches the file, so adding the entry is enough, no restart needed.
 - **404 from Traefik.** The site containers are not running, or the domain is missing from `/etc/hosts`.
 - **502 from nginx.** The `wordpress` container is not up yet. Check `docker compose logs wordpress`.
+- **A WP Migrate pull fails with "Unable to overwrite destination file" during the Plugins or Themes stage.** The plugin directory it names is not writable by `www-data`. Composer extracts dist archives with the modes stored in the archive, so plugins installed straight from wpackagist land without group write. `setup-theme.sh` fixes this, but a `composer install` run by hand reintroduces it. Repair a site with:
+
+  ```sh
+  cd <project>/src/wp-content
+  find . -user "$(id -u)" -type d -exec chmod g+rwxs {} +
+  find . -user "$(id -u)" -type f -exec chmod g+rw {} +
+  ```
 - **The asset build failed.** If the theme is the `eternia` starter, this is expected until `blocks/` and `block-library/` exist. Otherwise run `pnpm run build` in the theme directory to see the real error. The site itself keeps working, the theme just has no compiled assets.
 - **`composer install` fails with a 401 on connect.advancedcustomfields.com.** The ACF Pro license key in `traefik/templates/licenses.env` is missing or wrong, or the theme's `auth.json` password does not match the site URL the license is registered against.
 - **Setup container failed.** `docker compose logs wp-setup`. It waits up to two minutes for core files and wp-config.php, then gives up.
