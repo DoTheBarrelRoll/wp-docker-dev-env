@@ -118,7 +118,7 @@ It clones the repository at depth 1 into `src/wp-content/themes/eternia`, then:
 2. Copies `auth.json.example` to `auth.json` with the ACF Pro license key as the username and the local site URL as the password.
 3. Runs `composer install`, which installs ACF Pro and the other plugins into `wp-content/plugins/`. Skipped with a warning when no license key is configured, since ACF Pro cannot be downloaded without one.
 4. Runs `pnpm install` and `pnpm run build`.
-5. Activates the theme, then verifies that WordPress still loads and reverts to the previous theme if it does not.
+5. Activates ACF Pro, then the theme, then verifies that WordPress still loads and reverts to the previous theme if it does not. ACF Pro has to come first, because the themes call `get_field()` while WordPress loads.
 
 Activation is skipped when the Composer step did not run, or when the theme is a child of a parent that is not installed. The themes call plugin functions such as `get_field()` at load time, so activating one without its plugins takes the whole site down with a fatal error. If that ever happens by hand, recover with:
 
