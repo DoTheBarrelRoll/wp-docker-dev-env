@@ -2,6 +2,8 @@
 #
 # Scaffolds a local WordPress site: nginx, PHP-FPM and MySQL behind Traefik,
 # with a trusted mkcert certificate and a Mailpit inbox.
+#
+# Usage: ./create-site.sh [--multisite[=subdomain|subdirectory]]
 
 set -euo pipefail
 
@@ -30,6 +32,34 @@ host_is_mapped() {
     ' /etc/hosts
 }
 
+# --- Options -----------------------------------------------------------------
+
+NETWORK_TYPE=""
+
+usage() {
+    cat <<'EOF'
+Usage: ./create-site.sh [--multisite[=<type>]]
+
+  --multisite[=<type>]  Scaffold a WordPress network instead of a single site.
+                        <type> is 'subdomain', the default, or 'subdirectory'.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --multisite) NETWORK_TYPE="subdomain" ;;
+        --multisite=*) NETWORK_TYPE="${1#*=}" ;;
+        -h | --help) usage; exit 0 ;;
+        *) usage >&2; die "Unknown option '$1'." ;;
+    esac
+    shift
+done
+
+case "$NETWORK_TYPE" in
+    "" | subdomain | subdirectory) ;;
+    *) die "The network type is 'subdomain' or 'subdirectory', not '$NETWORK_TYPE'." ;;
+esac
+
 # --- Prerequisites -----------------------------------------------------------
 
 require_command docker "See https://docs.docker.com/engine/install/"
@@ -40,7 +70,8 @@ docker info >/dev/null 2>&1 || die "The Docker daemon is not reachable."
 CA_ROOT="$(mkcert -CAROOT)"
 [ -f "$CA_ROOT/rootCA.pem" ] || die "The mkcert local CA is missing. Run 'mkcert -install' once, then try again."
 
-for template in wp-template.yaml nginx.conf composer.json php-fpm-dev.ini php-cli-dev.ini mu-dev-mail.php; do
+for template in wp-template.yaml nginx.conf multisite-subdirectory.conf composer.json \
+    php-fpm-dev.ini php-cli-dev.ini mu-dev-mail.php mu-dev-multisite.php; do
     [ -f "$TEMPLATE_DIR/$template" ] || die "Template $TEMPLATE_DIR/$template is missing."
 done
 
@@ -90,6 +121,18 @@ if [ -n "$THEME_SLUG" ]; then
 fi
 
 PROJECT_DIR="$BASE_DIR/$SITE_NAME"
+
+# Regenerating a network as a single site would put WP_HOME and WP_SITEURL back
+# and pin every subsite to the main domain.
+if [ -z "$NETWORK_TYPE" ] && [ -f "$PROJECT_DIR/src/wp-config.php" ] \
+    && grep -qE "define\( *'MULTISITE', *true" "$PROJECT_DIR/src/wp-config.php"; then
+    existing="subdirectory"
+    if grep -qE "define\( *'SUBDOMAIN_INSTALL', *true" "$PROJECT_DIR/src/wp-config.php"; then
+        existing="subdomain"
+    fi
+    die "$SITE_NAME is already a $existing network. Re-run with --multisite=$existing."
+fi
+
 if [ -e "$PROJECT_DIR" ]; then
     printf '\n%s already exists.\n' "$PROJECT_DIR"
     printf 'Continuing rewrites docker-compose.yaml, nginx.conf, the PHP ini files and\n'
@@ -97,6 +140,35 @@ if [ -e "$PROJECT_DIR" ]; then
     reply=""
     read -r -p "Continue? [y/N] " reply || true
     [[ "$reply" =~ ^[Yy]$ ]] || die "Aborted."
+fi
+
+# --- Network type ------------------------------------------------------------
+
+# A single site pins its URL with WP_HOME and WP_SITEURL. A network cannot: it
+# reads every site URL from the network tables, so those two lines are dropped
+# from the compose file and WP-CLI writes the multisite constants into
+# src/wp-config.php when it installs the network instead.
+SERVER_NAME="$DOMAIN"
+TRAEFIK_RULE="Host(\`$DOMAIN\`)"
+IS_INSTALLED="is-installed"
+CORE_INSTALL="install"
+PLUGIN_ACTIVATE="plugin activate"
+COMPOSE_FILTER=()
+
+if [ -n "$NETWORK_TYPE" ]; then
+    COMPOSE_FILTER=(-e "/define( 'WP_HOME'/d" -e "/define( 'WP_SITEURL'/d")
+    IS_INSTALLED="is-installed --network"
+    CORE_INSTALL="multisite-install"
+    PLUGIN_ACTIVATE="plugin activate --network"
+fi
+
+if [ "$NETWORK_TYPE" = "subdomain" ]; then
+    CORE_INSTALL="multisite-install --subdomains"
+    SERVER_NAME="$DOMAIN *.$DOMAIN"
+    # Traefik v3 matches HostRegexp with a Go regular expression. The dots are
+    # literal, written as [.] so that no backslash has to survive YAML, and the
+    # anchor is written as $$, which is how Compose escapes a literal $.
+    TRAEFIK_RULE="Host(\`$DOMAIN\`) || HostRegexp(\`^.+[.]${DOMAIN//./[.]}\$\$\`)"
 fi
 
 # --- Project files -----------------------------------------------------------
@@ -113,7 +185,16 @@ else
     rm -f "$PROJECT_DIR/nginx/configs/uploads-proxy.conf"
     UPLOADS_FALLBACK="return 404;"
 fi
-sed -e "s|\${DOMAIN}|$DOMAIN|g" \
+if [ "$NETWORK_TYPE" = "subdirectory" ]; then
+    cp "$TEMPLATE_DIR/multisite-subdirectory.conf" "$PROJECT_DIR/nginx/configs/multisite-subdirectory.conf"
+    NGINX_FILTER=(-e "s|\${MULTISITE_REWRITES}|include /etc/nginx/custom_includes/multisite-subdirectory.conf;|")
+else
+    rm -f "$PROJECT_DIR/nginx/configs/multisite-subdirectory.conf"
+    NGINX_FILTER=(-e "/\${MULTISITE_REWRITES}/d")
+fi
+
+sed "${NGINX_FILTER[@]}" \
+    -e "s|\${SERVER_NAME}|$SERVER_NAME|g" \
     -e "s|\${UPLOADS_FALLBACK}|$UPLOADS_FALLBACK|g" \
     "$TEMPLATE_DIR/nginx.conf" > "$PROJECT_DIR/nginx/nginx.conf"
 
@@ -121,12 +202,22 @@ info "Generating PHP configuration"
 cp "$TEMPLATE_DIR/php-fpm-dev.ini" "$PROJECT_DIR/php/php-fpm-dev.ini"
 cp "$TEMPLATE_DIR/php-cli-dev.ini" "$PROJECT_DIR/php/php-cli-dev.ini"
 
-info "Installing the local mail routing mu-plugin"
+info "Installing the mu-plugins"
 cp "$TEMPLATE_DIR/mu-dev-mail.php" "$PROJECT_DIR/src/wp-content/mu-plugins/dev-mail.php"
+if [ -n "$NETWORK_TYPE" ]; then
+    cp "$TEMPLATE_DIR/mu-dev-multisite.php" "$PROJECT_DIR/src/wp-content/mu-plugins/dev-multisite.php"
+else
+    rm -f "$PROJECT_DIR/src/wp-content/mu-plugins/dev-multisite.php"
+fi
 
 info "Generating docker-compose.yaml"
-sed -e "s/\${SITE_NAME}/$SITE_NAME/g" \
+sed "${COMPOSE_FILTER[@]}" \
+    -e "s/\${SITE_NAME}/$SITE_NAME/g" \
     -e "s/\${DOMAIN}/$DOMAIN/g" \
+    -e "s@\${TRAEFIK_RULE}@$TRAEFIK_RULE@g" \
+    -e "s@\${IS_INSTALLED}@$IS_INSTALLED@g" \
+    -e "s@\${CORE_INSTALL}@$CORE_INSTALL@g" \
+    -e "s@\${PLUGIN_ACTIVATE}@$PLUGIN_ACTIVATE@g" \
     "$TEMPLATE_DIR/wp-template.yaml" > "$PROJECT_DIR/docker-compose.yaml"
 
 info "Generating SSL certificates"
@@ -227,6 +318,34 @@ EOF
 if [ -n "$THEME_SLUG" ] && [ "$theme_status" -eq 0 ]; then
     printf 'Theme      %s/src/wp-content/themes/%s\n' "$SITE_NAME" "$THEME_SLUG"
     printf 'Watch      cd %s/src/wp-content/themes/%s && pnpm run dev\n' "$SITE_NAME" "$THEME_SLUG"
+fi
+
+if [ -n "$NETWORK_TYPE" ]; then
+    cat <<EOF
+
+--- Network ---
+
+This is a $NETWORK_TYPE network. Create a subsite with:
+
+  cd $SITE_NAME && docker compose run --rm wp-cli wp site create --slug=sub
+EOF
+    if [ "$NETWORK_TYPE" = "subdomain" ]; then
+        cat <<EOF
+
+Each subsite then needs its own /etc/hosts line, because hosts files have no
+wildcards. The certificate and the Traefik router already cover them all:
+
+  127.0.0.1 sub.$DOMAIN
+EOF
+    else
+        printf '\nThe subsite is served at https://%s/sub/, no /etc/hosts change needed.\n' "$DOMAIN"
+    fi
+    cat <<EOF
+
+A network reads every site URL from its own tables, so WP_HOME and WP_SITEURL
+are not set here. After a production database import, put the site back on the
+local domain with wp search-replace.
+EOF
 fi
 
 if ! docker ps --format '{{.Names}}' | grep -qx traefik; then
