@@ -32,6 +32,20 @@ host_is_mapped() {
     ' /etc/hosts
 }
 
+# Reports whether the traefik container holds an endpoint on the proxy network.
+# Traefik publishes ports 80 and 443 only while it does, and Docker assigns that
+# endpoint when the container is created, never when it is started. A container
+# left over from an earlier network keeps reporting "Up" with an empty port list
+# while every site refuses connections, so match on the network ID: the stale
+# attachment carries the same name as the current network.
+traefik_on_proxy_network() {
+    local network_id
+    network_id="$(docker network inspect "$PROXY_NETWORK" --format '{{.ID}}' 2>/dev/null)" || return 1
+    [ -n "$network_id" ] || return 1
+    docker inspect traefik --format '{{range .NetworkSettings.Networks}}{{.NetworkID}} {{end}}' 2>/dev/null \
+        | tr ' ' '\n' | grep -qxF "$network_id"
+}
+
 # --- Options -----------------------------------------------------------------
 
 NETWORK_TYPE=""
@@ -83,6 +97,13 @@ fi
 if ! docker network inspect "$PROXY_NETWORK" >/dev/null 2>&1; then
     info "Creating the $PROXY_NETWORK network"
     docker network create "$PROXY_NETWORK" >/dev/null
+fi
+
+# Recreation is what reattaches traefik, because the endpoint is fixed when the
+# container is created. Restarting it would leave it detached.
+if docker container inspect traefik >/dev/null 2>&1 && ! traefik_on_proxy_network; then
+    info "Reattaching traefik to the $PROXY_NETWORK network"
+    (cd "$TRAEFIK_DIR" && docker compose up -d --force-recreate)
 fi
 
 # --- Input -------------------------------------------------------------------
@@ -351,4 +372,8 @@ fi
 if ! docker ps --format '{{.Names}}' | grep -qx traefik; then
     printf '\nWarning: the traefik container is not running, so the site is not reachable yet.\n'
     printf 'Start it with: cd traefik && docker compose up -d\n'
+elif ! traefik_on_proxy_network; then
+    printf '\nWarning: traefik is running but is not attached to the %s network, so the\n' "$PROXY_NETWORK"
+    printf 'site is not reachable yet. Reattach it with:\n'
+    printf '  cd traefik && docker compose up -d --force-recreate\n'
 fi
