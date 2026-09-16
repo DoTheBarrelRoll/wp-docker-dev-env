@@ -10,6 +10,7 @@ This environment automates the creation of high-performance WordPress instances 
 - **📧 Mail Never Leaves the Machine:** Every site gets a Mailpit inbox and an mu-plugin that routes all outgoing mail into it, so a production database imported locally cannot email real people.
 - **🐛 Debug-Ready:** `WP_DEBUG` with logging to `src/wp-content/debug.log`, `SCRIPT_DEBUG`, generous PHP limits, and opcache set to notice file changes immediately.
 - **💾 Isolated Data Persistence:** Each project uses its own named volume (`${SITE_NAME}_db_data`), so the database survives restarts and stays isolated from other projects.
+- **🏘️ Multisite:** `create-site.sh --multisite` scaffolds a subdomain or subdirectory network instead of a single site, with the router rule, the nginx rewrites and the network install handled for you.
 - **🤖 One-Command Scaffolding:** `create-site.sh` handles directories, SSL, config templating, plugin installation and startup. `delete-site.sh` removes all of it again.
 - **🎨 Theme Bootstrapping:** `setup-theme.sh` clones a theme from `github.com/redandbluefi`, writes its `.env` and `auth.json` for the local domain, installs Composer and npm dependencies, builds the assets and activates it.
 - **📁 Organised Directory Mapping:** WordPress lives in a `./src` subfolder, keeping the project root free for configuration.
@@ -27,8 +28,10 @@ This environment automates the creation of high-performance WordPress instances 
     - `wp-template.yaml`: The per-site Docker Compose stack.
     - `nginx.conf`: The per-site nginx server block.
     - `uploads-proxy.conf`: Optional fallback that redirects missing uploads to production.
+    - `multisite-subdirectory.conf`: Core path rewrites, included only by a subdirectory network.
     - `php-fpm-dev.ini`, `php-cli-dev.ini`: PHP overrides for the web and CLI containers.
     - `mu-dev-mail.php`: The mu-plugin that routes mail into Mailpit.
+    - `mu-dev-multisite.php`: The mu-plugin that stores new subsites on https. Networks only.
     - `composer.json`, `auth.json.example`: WP Migrate DB Pro installation.
     - `licenses.env.example`: Where the ACF Pro license key goes.
 
@@ -95,6 +98,8 @@ The script asks for four things:
 
 It then generates the project, issues the certificate, installs plugins, starts the stack, waits for the WordPress install to finish, sets up the theme, fixes ownership, and offers to add the `/etc/hosts` entry.
 
+Add `--multisite` to get a network instead of a single site. See [Multisite](#-multisite) below.
+
 ### 5. What you get
 
 | | |
@@ -103,6 +108,64 @@ It then generates the project, issues the certificate, installs plugins, starts 
 | Admin | `https://my-blog.test/wp-admin`, user `admin`, password `password` |
 | Mail | `https://mail.my-blog.test` |
 | Debug log | `my-blog/src/wp-content/debug.log` |
+
+## 🏘️ Multisite
+
+```sh
+./create-site.sh --multisite               # subdomain network
+./create-site.sh --multisite=subdirectory  # subdirectory network
+```
+
+The prompts and everything else are the same. `wp core multisite-install` runs in place of `wp core install`, and it writes the multisite constants into `src/wp-config.php` itself, so they appear only once the network tables exist. The official image generates `wp-config.php` only when it is missing, so those constants survive restarts and a re-run of `create-site.sh`.
+
+| | Subdomain | Subdirectory |
+|---|---|---|
+| Subsite address | `https://sub.my-blog.test` | `https://my-blog.test/sub/` |
+| Traefik router | `Host()` plus a `HostRegexp()` that matches every subdomain | unchanged |
+| nginx | `server_name` widened to `*.my-blog.test` | core path rewrites included |
+| `/etc/hosts` | one line per subsite | nothing to add |
+
+TLS needs no work either way. `create-site.sh` issues the certificate for `$DOMAIN` and `*.$DOMAIN`, so subsite hostnames are already covered.
+
+### Adding a subsite
+
+```sh
+cd my-blog
+docker compose run --rm wp-cli wp site create --slug=sub
+```
+
+On a subdomain network the hostname also needs its own line in `/etc/hosts`, because hosts files have no wildcards:
+
+```
+127.0.0.1 sub.my-blog.test
+```
+
+### Converting an existing site
+
+Re-running `create-site.sh` for a project that already exists, with the flag added, turns it into a network. The database and `src/` are left alone: `wp core multisite-install` finds the single site tables already there and adds the network tables and constants around them.
+
+```sh
+./create-site.sh --multisite
+```
+
+The opposite is refused. Without the flag, `create-site.sh` stops rather than regenerate a network's compose file as a single site, because that would put `WP_HOME` and `WP_SITEURL` back and pin every subsite to the main domain.
+
+### The site URL trade-off
+
+A single site defines `WP_HOME` and `WP_SITEURL` in its compose file, which keeps it on the local domain even right after a production database import. A network reads every site URL from its own tables, so those two constants would pin every subsite to the main domain, and `create-site.sh` leaves them out. The local URLs have to come from a search and replace after each pull instead:
+
+```sh
+docker compose run --rm wp-cli wp search-replace 'example.com' 'my-blog.test' --network
+```
+
+Replace the bare domain rather than the full URL, so that subsite hostnames and paths are rewritten too. `DOMAIN_CURRENT_SITE` in `src/wp-config.php` keeps pointing at the local main domain, so the network still boots, but the rows in `wp_blogs` and `wp_site` come from the dump until they are replaced.
+
+Also worth knowing:
+
+- **New subsites are stored on https.** WordPress hardcodes `http` for a new subsite on a subdomain network, because in production a fresh subdomain has no certificate yet. Here it has one, so the `dev-multisite.php` mu-plugin corrects the stored `home` and `siteurl` as the subsite is created.
+- **Themes and plugins are network-enabled.** When `setup-theme.sh` finds a network it uses `wp theme enable --network --activate` and `wp plugin activate --network`, so subsites can use them.
+- **Check the WP Migrate plan before relying on it for a network pull.** Multisite is not included in every tier, so verify it against the license rather than assuming.
+- **The subdirectory rewrites use `if (!-e $request_filename)`.** This is the rewrite set WordPress documents for nginx, and it has to run before nginx picks a location so the stripped URI reaches the PHP handler. `try_files` cannot do that: it would match an existing `.php` file and serve its source. The reasoning is in `multisite-subdirectory.conf`.
 
 ## 🎨 Project theme
 
@@ -163,9 +226,9 @@ This stops the containers, deletes the database volume, removes the certificate 
 
 ## ⚙️ Configuration notes
 
-- **PHP version.** Pinned in `traefik/templates/wp-template.yaml` (`wordpress:php8.3-fpm`, `wordpress:cli-php8.3`). Change it there to match the target hosting. WordPress core itself lives in `src/` and is therefore pinned per project by the bind mount, not by the image tag.
+- **PHP version.** Pinned in `traefik/templates/wp-template.yaml` (`wordpress:php8.4-fpm`, `wordpress:cli-php8.4`). Change it there to match the target hosting. WordPress core itself lives in `src/` and is therefore pinned per project by the bind mount, not by the image tag.
 - **Database.** WordPress connects as the `wordpress` user, the same as in production. The `root` account still exists for administrative work: `docker compose exec mysql mysql -uroot -prootpassword wordpress`.
-- **Site URL.** `WP_HOME` and `WP_SITEURL` are defined in the compose file, so the site stays on its local domain even right after a production database import. `wp search-replace` is still needed for URLs inside post content.
+- **Site URL.** `WP_HOME` and `WP_SITEURL` are defined in the compose file, so the site stays on its local domain even right after a production database import. `wp search-replace` is still needed for URLs inside post content. A network does not get them, see [Multisite](#-multisite).
 - **PHP limits.** 128M uploads, 512M memory, 300s execution time for web requests, and no time limit for WP-CLI. Edit `php/php-fpm-dev.ini` and `php/php-cli-dev.ini` in the project, or the templates for all future sites.
 - **Uploads fallback.** With a production domain configured, a request for an upload that does not exist locally is redirected to production, so a database import does not need the media library. Its rule lives in `nginx/configs/uploads-proxy.conf`.
 - **Restart policy.** Containers use `restart: "no"`, so nothing comes back automatically after a reboot. Start the projects you are working on with `docker compose up -d`.
@@ -174,7 +237,7 @@ This stops the containers, deletes the database volume, removes the certificate 
 
 - **Browser warns about the certificate.** Run `mkcert -install`, then restart the browser. If the certificate was issued before the CA was installed, delete the site and create it again.
 - **Traefik serves its own default certificate.** The site is missing from `traefik/dynamic_conf.yaml`. Traefik watches the file, so adding the entry is enough, no restart needed.
-- **404 from Traefik.** The site containers are not running, or the domain is missing from `/etc/hosts`.
+- **404 from Traefik.** The site containers are not running, or the domain is missing from `/etc/hosts`. On a subdomain network every subsite needs its own `/etc/hosts` line.
 - **502 from nginx.** The `wordpress` container is not up yet. Check `docker compose logs wordpress`.
 - **A WP Migrate pull fails with "Unable to overwrite destination file" during the Plugins or Themes stage.** The plugin directory it names is not writable by `www-data`. Composer extracts dist archives with the modes stored in the archive, so plugins installed straight from wpackagist land without group write. `setup-theme.sh` fixes this, but a `composer install` run by hand reintroduces it. Repair a site with:
 

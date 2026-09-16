@@ -241,13 +241,28 @@ if [ -n "$(cd "$PROJECT_DIR" && docker compose ps --status running -q wordpress 
     site_running=1
 fi
 
+# On a network a theme has to be enabled for the whole network before any site
+# can use it, and a plugin is activated network-wide so that every subsite has
+# it. Both are different commands from the single-site ones.
+is_network=0
+if [ "$site_running" -eq 1 ] && wp_cli wp core is-installed --network >/dev/null 2>&1; then
+    is_network=1
+fi
+
+PLUGIN_ACTIVATE=(plugin activate)
+THEME_ACTIVATE=(theme activate)
+if [ "$is_network" -eq 1 ]; then
+    PLUGIN_ACTIVATE=(plugin activate --network)
+    THEME_ACTIVATE=(theme enable --network --activate)
+fi
+
 # ACF Pro has to be active before the theme is: the themes call get_field()
 # while WordPress loads, so activating the theme first fatals the site.
 ACF_PLUGIN="advanced-custom-fields-pro"
 acf_activated="no"
 if [ "$site_running" -eq 1 ] && [ -d "$PROJECT_DIR/src/wp-content/plugins/$ACF_PLUGIN" ]; then
     info "Activating ACF Pro"
-    if wp_cli wp plugin activate "$ACF_PLUGIN"; then
+    if wp_cli wp "${PLUGIN_ACTIVATE[@]}" "$ACF_PLUGIN"; then
         acf_activated="yes"
     else
         warn "Could not activate $ACF_PLUGIN. A theme that calls ACF functions will fatal."
@@ -263,7 +278,7 @@ elif [ "$site_running" -eq 0 ]; then
 else
     info "Activating the theme"
     previous_theme="$(wp_cli wp option get stylesheet 2>/dev/null || true)"
-    wp_cli wp theme activate "$THEME_SLUG"
+    wp_cli wp "${THEME_ACTIVATE[@]}" "$THEME_SLUG"
 
     # A theme that fatals on load takes the whole site down, so verify that
     # WordPress still boots and back out if it does not.
@@ -272,9 +287,9 @@ else
         echo "WordPress loads the theme cleanly."
     elif [ -n "$previous_theme" ]; then
         warn "WordPress fails to load with this theme. Reverting to '$previous_theme'."
-        wp_cli wp --skip-themes theme activate "$previous_theme"
+        wp_cli wp --skip-themes "${THEME_ACTIVATE[@]}" "$previous_theme"
     else
-        warn "WordPress fails to load with this theme, and the previous theme could not be determined. Recover with: docker compose run --rm wp-cli wp --skip-themes theme activate twentytwentyfive"
+        warn "WordPress fails to load with this theme, and the previous theme could not be determined. Recover with: docker compose run --rm wp-cli wp --skip-themes ${THEME_ACTIVATE[*]} twentytwentyfive"
     fi
 fi
 
@@ -288,8 +303,8 @@ Watch      cd $SITE_NAME/src/wp-content/themes/$THEME_SLUG && pnpm run dev
 EOF
 
 if [ "$activated" != "yes" ]; then
-    printf 'Activate   cd %s && docker compose run --rm wp-cli wp theme activate %s\n' \
-        "$SITE_NAME" "$THEME_SLUG"
+    printf 'Activate   cd %s && docker compose run --rm wp-cli wp %s %s\n' \
+        "$SITE_NAME" "${THEME_ACTIVATE[*]}" "$THEME_SLUG"
 fi
 if [ "$assets_built" = "no" ]; then
     printf 'Assets     NOT BUILT, see the build output above\n'

@@ -10,8 +10,9 @@ x-wp-env: &wp-env
   WORDPRESS_DB_USER: wordpress
   WORDPRESS_DB_PASSWORD: wordpress
   # Applied in every context that loads wp-config.php, web and WP-CLI alike.
-  # WP_HOME and WP_SITEURL keep the site local even when the database comes
-  # from production.
+  # WP_HOME and WP_SITEURL, generated for a single site only, keep the site
+  # local even when the database comes from production. A network reads every
+  # site URL from its own tables, so they cannot be pinned there.
   WORDPRESS_CONFIG_EXTRA: |
     define( 'FS_METHOD', 'direct' );
     define( 'WP_DEBUG_LOG', true );
@@ -44,7 +45,7 @@ services:
     restart: "no"
 
   wordpress:
-    image: wordpress:php8.3-fpm
+    image: wordpress:php8.4-fpm
     container_name: ${SITE_NAME}-app
     depends_on:
       mysql:
@@ -71,7 +72,7 @@ services:
       - ./nginx/configs:/etc/nginx/custom_includes:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.${SITE_NAME}.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.${SITE_NAME}.rule=${TRAEFIK_RULE}"
       - "traefik.http.routers.${SITE_NAME}.entrypoints=websecure"
       - "traefik.http.routers.${SITE_NAME}.tls=true"
       - "traefik.http.services.${SITE_NAME}.loadbalancer.server.port=80"
@@ -92,6 +93,10 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.${SITE_NAME}-mail.rule=Host(`mail.${DOMAIN}`)"
+      # Traefik derives a router's priority from the length of its rule, and on
+      # a subdomain network the site rule is both longer and a match for
+      # mail.${DOMAIN}. An explicit priority keeps the inbox reachable.
+      - "traefik.http.routers.${SITE_NAME}-mail.priority=100"
       - "traefik.http.routers.${SITE_NAME}-mail.entrypoints=websecure"
       - "traefik.http.routers.${SITE_NAME}-mail.tls=true"
       - "traefik.http.services.${SITE_NAME}-mail.loadbalancer.server.port=8025"
@@ -105,7 +110,7 @@ services:
   # wordpress container to lay down core files and wp-config.php instead of
   # writing its own, so the reverse proxy and config extras stay intact.
   wp-setup:
-    image: wordpress:cli-php8.3
+    image: wordpress:cli-php8.4
     container_name: ${SITE_NAME}-setup
     user: "33:33"
     depends_on:
@@ -127,19 +132,19 @@ services:
       echo 'Waiting for WordPress core files...';
       for i in $$(seq 1 60); do [ -f wp-load.php ] && [ -s wp-config.php ] && break; sleep 2; done;
       if [ ! -s wp-config.php ]; then echo 'The wordpress container never created wp-config.php.'; exit 1; fi;
-      if wp core is-installed 2>/dev/null; then
+      if wp core ${IS_INSTALLED} 2>/dev/null; then
         echo 'WordPress is already installed.';
       else
         echo 'Installing WordPress...';
-        wp core install --url=https://${DOMAIN} --title='${SITE_NAME} Local' --admin_user=admin --admin_password=password --admin_email=admin@${DOMAIN} --skip-email;
+        wp core ${CORE_INSTALL} --url=https://${DOMAIN} --title='${SITE_NAME} Local' --admin_user=admin --admin_password=password --admin_email=admin@${DOMAIN} --skip-email;
       fi;
-      if wp plugin is-installed wp-migrate-db-pro; then wp plugin activate wp-migrate-db-pro; fi;
+      if wp plugin is-installed wp-migrate-db-pro; then wp ${PLUGIN_ACTIVATE} wp-migrate-db-pro; fi;
       "
 
   # Not started by "docker compose up". Use:
   #   docker compose run --rm wp-cli wp <command>
   wp-cli:
-    image: wordpress:cli-php8.3
+    image: wordpress:cli-php8.4
     profiles:
       - cli
     user: "33:33"
