@@ -24,18 +24,24 @@ x-wp-env: &wp-env
     define( 'WP_SITEURL', 'https://${DOMAIN}' );
 
 services:
+  # MariaDB, because the WP-CLI image ships the MariaDB client. Against MySQL
+  # 8.0 that client rejects the server's self-signed certificate and cannot
+  # load caching_sha2_password, so every "wp db" command fails to connect.
   mysql:
-    image: mysql:8.0
+    image: mariadb:11.8
     container_name: ${SITE_NAME}-db
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: wordpress
-      MYSQL_USER: wordpress
-      MYSQL_PASSWORD: wordpress
+      MARIADB_ROOT_PASSWORD: rootpassword
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: wordpress
+      # Lets the server upgrade its own data directory when the image tag is
+      # bumped, instead of refusing to start on the existing volume.
+      MARIADB_AUTO_UPGRADE: 1
     volumes:
       - db_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p\"$$MARIADB_ROOT_PASSWORD\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
