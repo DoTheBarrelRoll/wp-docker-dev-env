@@ -11,6 +11,7 @@ Single sites and multisite networks.
 - **Traefik reverse proxy.** One gateway for every project, each on its own domain, with plain HTTP redirected to HTTPS.
 - **Mail never leaves the machine.** Every site gets a Mailpit inbox and an mu-plugin that routes all outgoing mail into it, so a production database imported locally cannot email real people.
 - **Debug ready.** `WP_DEBUG` logging to `src/wp-content/debug.log`, `SCRIPT_DEBUG`, raised PHP limits, and opcache picking up file changes immediately.
+- **Per-site environment variables.** A `.env` in the project directory reaches PHP-FPM and WP-CLI, for themes and plugins that read keys with `getenv()`. It lives outside the webroot and outside version control.
 - **Isolated databases.** One named volume per project, `${SITE_NAME}_db_data`, surviving restarts.
 - **Multisite.** `--multisite` scaffolds a subdomain or subdirectory network, including the router rule, the nginx rewrites and the network install.
 - **Theme bootstrapping.** `setup-theme.sh` clones a theme from `github.com/redandbluefi`, writes its `.env` and `auth.json`, installs dependencies, builds the assets and activates it.
@@ -207,6 +208,33 @@ For day to day work, the watch task lives in the theme:
 cd my-blog/src/wp-content/themes/eternia && pnpm run dev
 ```
 
+## Site environment variables
+
+`create-site.sh` writes a `.env` into the project directory, next to
+`docker-compose.yaml`. Everything in it is passed to the `wordpress`, `wp-setup`
+and `wp-cli` containers, so a theme or plugin can read it with `getenv()`:
+
+```sh
+# my-blog/.env
+SOME_API_KEY=xxxx
+```
+
+A container keeps the environment it was created with, so after editing the file:
+
+```sh
+docker compose up -d --force-recreate wordpress
+```
+
+The file sits outside `src/`, so nginx never serves it, and every project
+directory is git-ignored. `create-site.sh` creates it once and never rewrites it,
+and the compose file wins over it, so a stray `WORDPRESS_DB_HOST` in it cannot
+take the database out from under the stack.
+
+This is not the theme's own `.env`, which configures the asset build, see
+[Project theme](#project-theme). Some themes also ship a `.env` for PHP and load
+it themselves with `vlucas/phpdotenv`; those keep working as they are. A theme
+that calls `getenv()` without loading anything needs its values here instead.
+
 ## Daily use
 
 All commands are run from the project directory.
@@ -249,6 +277,7 @@ uncommitted and unpushed counts first, so nothing unsaved disappears by accident
 - **404 from Traefik.** The site containers are not running, or the domain is missing from `/etc/hosts`. On a subdomain network every subsite needs its own line.
 - **502 from nginx.** The `wordpress` container is not up yet. Check `docker compose logs wordpress`.
 - **Setup container failed.** `docker compose logs wp-setup`. It waits up to two minutes for core files and `wp-config.php`, then gives up.
+- **`docker compose` complains that the env file is missing.** An older Compose does not understand `required: false` on an `env_file` entry. Create an empty `.env` in the project directory, or upgrade Compose.
 - **A WP Migrate pull fails with "Unable to overwrite destination file".** The plugin directory it names is not writable by `www-data`. Composer extracts dist archives with the modes stored in the archive, so plugins installed straight from wpackagist land without group write. `setup-theme.sh` fixes this, but a `composer install` run by hand reintroduces it. Repair with:
 
   ```sh

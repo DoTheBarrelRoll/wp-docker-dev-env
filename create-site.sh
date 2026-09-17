@@ -159,7 +159,8 @@ fi
 if [ -e "$PROJECT_DIR" ]; then
     printf '\n%s already exists.\n' "$PROJECT_DIR"
     printf 'Continuing rewrites docker-compose.yaml, nginx.conf, the PHP ini files and\n'
-    printf 'composer.json. The database volume and everything in src/ are left alone.\n'
+    printf 'composer.json. The database volume, .env and everything in src/ are left\n'
+    printf 'alone.\n'
     reply=""
     read -r -p "Continue? [y/N] " reply || true
     [[ "$reply" =~ ^[Yy]$ ]] || die "Aborted."
@@ -233,6 +234,30 @@ else
     rm -f "$PROJECT_DIR/src/wp-content/mu-plugins/dev-multisite.php"
 fi
 
+# Holds secrets once a project is under way, so an existing file is never
+# rewritten. The compose file marks it optional, and a site that needs nothing
+# from it simply leaves it as comments.
+info "Preparing .env"
+if [ -f "$PROJECT_DIR/.env" ]; then
+    echo "Keeping the existing .env."
+else
+    cat > "$PROJECT_DIR/.env" <<'EOF'
+# Environment variables for this site, passed to PHP-FPM and to WP-CLI. A theme
+# or plugin reads them with getenv(). One KEY=value per line, no quotes needed:
+#
+#   SOME_API_KEY=xxxx
+#
+# This file stays outside src/, so nginx never serves it, and it is not in
+# version control. After editing it run
+#
+#   docker compose up -d --force-recreate wordpress
+#
+# because a running container keeps the environment it was created with.
+EOF
+    chmod 600 "$PROJECT_DIR/.env"
+    echo "Created."
+fi
+
 info "Generating docker-compose.yaml"
 sed "${COMPOSE_FILTER[@]}" \
     -e "s/\${SITE_NAME}/$SITE_NAME/g" \
@@ -295,8 +320,10 @@ info "Normalising ownership and permissions"
 sudo chown -R "$USER:$WWW_DATA_GID" "$PROJECT_DIR"
 sudo find "$PROJECT_DIR" -type d -exec chmod 2775 {} +
 # g+rw rather than an absolute mode, so executables in vendor/ and
-# node_modules/ keep their execute bit.
-sudo find "$PROJECT_DIR" -type f -exec chmod g+rw {} +
+# node_modules/ keep their execute bit. Files named .env are skipped: they hold
+# secrets, and the compose CLI and the theme build both read them as you rather
+# than as www-data.
+sudo find "$PROJECT_DIR" -type f ! -name .env -exec chmod g+rw {} +
 
 theme_status=0
 if [ -n "$THEME_SLUG" ]; then
@@ -331,6 +358,7 @@ Site       https://$DOMAIN
 Admin      https://$DOMAIN/wp-admin  (admin / password)
 Mail       https://mail.$DOMAIN
 Debug log  $SITE_NAME/src/wp-content/debug.log
+Env vars   $SITE_NAME/.env
 
 WP-CLI     cd $SITE_NAME && docker compose run --rm wp-cli wp <command>
 Logs       cd $SITE_NAME && docker compose logs -f

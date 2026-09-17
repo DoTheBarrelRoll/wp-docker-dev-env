@@ -4,6 +4,16 @@
 # when images are pulled again. WordPress core itself lives in ./src and is
 # therefore pinned per project by the bind mount, not by the image tag.
 
+# Per-site environment variables, for the values a theme or plugin reads with
+# getenv(): API keys, tokens, feature switches. create-site.sh writes the file
+# with a comment header and leaves the values to you. It sits outside ./src, so
+# nginx never serves it, and environment: below wins over it, so nothing in it
+# can take the database or the site URL out from under the stack. Compose reads
+# the same file for ${...} interpolation here, so keep COMPOSE_* keys out of it.
+x-wp-secrets: &wp-secrets
+  - path: ./.env
+    required: false
+
 x-wp-env: &wp-env
   WORDPRESS_DB_HOST: mysql
   WORDPRESS_DB_NAME: wordpress
@@ -56,6 +66,7 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+    env_file: *wp-secrets
     environment:
       <<: *wp-env
       # Only the web container debugs; WP-CLI output stays free of notices.
@@ -124,6 +135,7 @@ services:
         condition: service_healthy
       wordpress:
         condition: service_started
+    env_file: *wp-secrets
     environment:
       <<: *wp-env
       WP_CLI_CACHE_DIR: /tmp/wp-cli-cache
@@ -157,6 +169,7 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+    env_file: *wp-secrets
     environment:
       <<: *wp-env
       WP_CLI_CACHE_DIR: /tmp/wp-cli-cache
