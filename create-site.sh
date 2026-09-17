@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Scaffolds a local WordPress site: nginx, PHP-FPM and MySQL behind Traefik,
+# Scaffolds a local WordPress site: nginx, PHP-FPM and MariaDB behind Traefik,
 # with a trusted mkcert certificate and a Mailpit inbox.
 #
 # Usage: ./create-site.sh [--multisite[=subdomain|subdirectory]]
@@ -120,7 +120,9 @@ DOMAIN="${DOMAIN,,}"
 [[ "$DOMAIN" =~ $HOSTNAME_RE ]] || die "'$DOMAIN' does not look like a hostname."
 case "$DOMAIN" in
     *.test) ;;
-    *) printf "Note: .test is the TLD reserved for local use. Public TLDs such as .dev are in the browser HSTS preload list and behave differently.\n" ;;
+    *) printf 'Note: .test is reserved for local use (RFC 6761) and can never be registered.\n'
+       printf 'A public TLD such as .dev may already belong to someone else, and then only\n'
+       printf 'the /etc/hosts entry keeps traffic off their server.\n' ;;
 esac
 
 PROD_DOMAIN=""
