@@ -14,11 +14,31 @@ x-wp-secrets: &wp-secrets
   - path: ./.env
     required: false
 
+# Docker Engine on Linux does not resolve host.docker.internal by itself, and
+# the egress proxy listens on the host. Only the containers that make outbound
+# requests of their own need the name.
+x-wp-host: &wp-host
+  - "host.docker.internal:host-gateway"
+
 x-wp-env: &wp-env
   WORDPRESS_DB_HOST: mysql
   WORDPRESS_DB_NAME: wordpress
   WORDPRESS_DB_USER: wordpress
   WORDPRESS_DB_PASSWORD: wordpress
+  # Everything the containers send out goes through the egress proxy in the
+  # traefik stack, which runs in the host's network namespace. A VPN client
+  # takes the default route for itself and leaves a bridge network with no way
+  # out; without this, WP Migrate cannot activate its license, WP-CLI cannot
+  # install a plugin and Composer cannot reach packagist. Both spellings are
+  # set, because curl reads the lower case names and most other tools the upper
+  # case ones. Put DEV_PROXY_URL= in ./.env to send traffic straight out
+  # instead, on a machine that does not run the proxy.
+  http_proxy: &proxy-url "${DEV_PROXY_URL-http://host.docker.internal:3128}"
+  https_proxy: *proxy-url
+  HTTP_PROXY: *proxy-url
+  HTTPS_PROXY: *proxy-url
+  no_proxy: &proxy-bypass "${DEV_PROXY_BYPASS-localhost,127.0.0.1,mysql,nginx,mailpit,${DOMAIN},*.${DOMAIN}}"
+  NO_PROXY: *proxy-bypass
   # Applied in every context that loads wp-config.php, web and WP-CLI alike.
   # WP_HOME and WP_SITEURL, generated for a single site only, keep the site
   # local even when the database comes from production. A network reads every
@@ -32,6 +52,15 @@ x-wp-env: &wp-env
     define( 'AUTOMATIC_UPDATER_DISABLED', true );
     define( 'WP_HOME', 'https://${DOMAIN}' );
     define( 'WP_SITEURL', 'https://${DOMAIN}' );
+    // The WordPress HTTP API, and with it WP Migrate, takes a proxy from these
+    // constants. The environment alone would cover only the requests that go
+    // out through curl, not the ones that fall back to sockets. Nothing is
+    // defined when the proxy is switched off with an empty DEV_PROXY_URL.
+    if ( getenv( 'http_proxy' ) ) {
+        define( 'WP_PROXY_HOST', parse_url( getenv( 'http_proxy' ), PHP_URL_HOST ) );
+        define( 'WP_PROXY_PORT', parse_url( getenv( 'http_proxy' ), PHP_URL_PORT ) ?: 80 );
+        define( 'WP_PROXY_BYPASS_HOSTS', getenv( 'no_proxy' ) ?: '' );
+    }
 
 services:
   # MariaDB, because the WP-CLI image ships the MariaDB client. Against MySQL
@@ -67,6 +96,7 @@ services:
       mysql:
         condition: service_healthy
     env_file: *wp-secrets
+    extra_hosts: *wp-host
     environment:
       <<: *wp-env
       # Only the web container debugs; WP-CLI output stays free of notices.
@@ -136,6 +166,7 @@ services:
       wordpress:
         condition: service_started
     env_file: *wp-secrets
+    extra_hosts: *wp-host
     environment:
       <<: *wp-env
       WP_CLI_CACHE_DIR: /tmp/wp-cli-cache
@@ -170,6 +201,7 @@ services:
       mysql:
         condition: service_healthy
     env_file: *wp-secrets
+    extra_hosts: *wp-host
     environment:
       <<: *wp-env
       WP_CLI_CACHE_DIR: /tmp/wp-cli-cache

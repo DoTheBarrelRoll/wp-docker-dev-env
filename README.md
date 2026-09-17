@@ -11,6 +11,7 @@ Single sites and multisite networks.
 - **Traefik reverse proxy.** One gateway for every project, each on its own domain, with plain HTTP redirected to HTTPS.
 - **Mail never leaves the machine.** Every site gets a Mailpit inbox and an mu-plugin that routes all outgoing mail into it, so a production database imported locally cannot email real people.
 - **Debug ready.** `WP_DEBUG` logging to `src/wp-content/debug.log`, `SCRIPT_DEBUG`, raised PHP limits, and opcache picking up file changes immediately.
+- **Outbound traffic survives a VPN.** A forward proxy in the shared stack carries everything the site containers send out, so WP Migrate, plugin installs and Composer keep working while a VPN client owns the machine's default route.
 - **Per-site environment variables.** A `.env` in the project directory reaches PHP-FPM and WP-CLI, for themes and plugins that read keys with `getenv()`. It lives outside the webroot and outside version control.
 - **Isolated databases.** One named volume per project, `${SITE_NAME}_db_data`, surviving restarts.
 - **Multisite.** `--multisite` scaffolds a subdomain or subdirectory network, including the router rule, the nginx rewrites and the network install.
@@ -21,7 +22,8 @@ Single sites and multisite networks.
 - `create-site.sh` — creates a site. `--multisite[=subdomain|subdirectory]` makes it a network.
 - `setup-theme.sh` — clones a theme from `github.com/redandbluefi` into a site and gets it ready to run.
 - `delete-site.sh` — removes a site, its database volume, its certificate and its Traefik entry.
-- `traefik/` — the shared reverse proxy. `dynamic_conf.yaml` and `certs/` are generated and not in version control.
+- `traefik/` — the shared stack: the Traefik reverse proxy and the egress proxy. `dynamic_conf.yaml` and `certs/` are generated and not in version control.
+- `traefik/squid.conf` — the egress proxy, which carries the site containers' outbound HTTP and HTTPS.
 - `traefik/templates/` — everything a new site is built from:
   - `wp-template.yaml` — the per-site Docker Compose stack.
   - `nginx.conf` — the per-site server block.
@@ -43,11 +45,15 @@ Single sites and multisite networks.
 
 ## Setup
 
-### 1. Start the Traefik gateway
+### 1. Start the shared stack
 
 ```sh
 cd traefik && docker compose up -d
 ```
+
+This starts two containers: Traefik, which serves every site, and `egress-proxy`,
+which carries what the sites send out, see
+[Outbound connections](#outbound-connections). Both restart with Docker.
 
 The `web-proxy` network and `dynamic_conf.yaml` are created by `create-site.sh`
 when missing, so this step is only about getting the proxy itself running. The
@@ -268,7 +274,36 @@ uncommitted and unpushed counts first, so nothing unsaved disappears by accident
 - **Site URL.** `WP_HOME` and `WP_SITEURL` are defined in the compose file, so a single site stays on its local domain even right after a production database import. `wp search-replace` is still needed for URLs inside post content. A network does not get them, see [Multisite](#multisite).
 - **PHP limits.** 128M uploads, 512M memory and 300s execution time for web requests; 1024M and no time limit for WP-CLI. Edit `php/php-fpm-dev.ini` and `php/php-cli-dev.ini` in the project, or the templates for all future sites.
 - **Uploads fallback.** With a production domain configured, a request for an upload that does not exist locally is redirected to production, so a database import does not need the media library. The rule lives in `nginx/configs/uploads-proxy.conf`.
+- **Outbound connections.** Everything the `wordpress`, `wp-setup` and `wp-cli` containers send out goes through `egress-proxy`, see [Outbound connections](#outbound-connections).
 - **Restart policy.** Containers use `restart: "no"`, so nothing comes back after a reboot. Start the projects you are working on with `docker compose up -d`.
+
+## Outbound connections
+
+A VPN client takes the machine's default route for itself, and the Docker bridge
+networks are then a dead end: a container still reaches the host and the LAN, but
+nothing beyond them. WP Migrate cannot activate its license, `wp plugin install`
+times out and Composer cannot reach packagist, while the same requests from a
+terminal on the host work.
+
+`egress-proxy`, part of the shared stack, is the way around it. It is a Squid
+forward proxy that shares the host's network namespace, which is the one path out
+that the VPN does route, and the `wordpress`, `wp-setup` and `wp-cli` containers
+are pointed at it with `http_proxy` and the matching `WP_PROXY_*` constants. It
+listens on the `docker0` gateway only, so nothing outside the machine can use it,
+and it caches nothing.
+
+Requests leave the machine exactly as they would from the host, over the VPN when
+the VPN is up, so this is a detour around Docker's routing rather than around the
+tunnel.
+
+To watch what goes through it:
+
+```sh
+docker exec egress-proxy tail -f /var/log/squid/access.log
+```
+
+A machine that never runs the proxy can send traffic straight out by putting an
+empty `DEV_PROXY_URL=` in the project's `.env` and recreating the containers.
 
 ## Troubleshooting
 
@@ -278,6 +313,7 @@ uncommitted and unpushed counts first, so nothing unsaved disappears by accident
 - **502 from nginx.** The `wordpress` container is not up yet. Check `docker compose logs wordpress`.
 - **Setup container failed.** `docker compose logs wp-setup`. It waits up to two minutes for core files and `wp-config.php`, then gives up.
 - **`docker compose` complains that the env file is missing.** An older Compose does not understand `required: false` on an `env_file` entry. Create an empty `.env` in the project directory, or upgrade Compose.
+- **A container reaches nothing outside the machine.** WP Migrate will not activate, `wp plugin install` hangs, Composer cannot reach packagist, and cURL error 7 fills `debug.log`. Check that the egress proxy is up with `docker ps --filter name=egress-proxy`, and start it with `cd traefik && docker compose up -d`. A site scaffolded before the proxy existed does not know about it yet: re-run `./create-site.sh` for it, which rewrites `docker-compose.yaml` and leaves the database and `src/` alone. See [Outbound connections](#outbound-connections).
 - **A WP Migrate pull fails with "Unable to overwrite destination file".** The plugin directory it names is not writable by `www-data`. Composer extracts dist archives with the modes stored in the archive, so plugins installed straight from wpackagist land without group write. `setup-theme.sh` fixes this, but a `composer install` run by hand reintroduces it. Repair with:
 
   ```sh

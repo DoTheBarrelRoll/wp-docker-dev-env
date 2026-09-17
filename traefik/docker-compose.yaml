@@ -30,6 +30,20 @@ services:
     networks:
       - web-proxy
 
+  # Outbound HTTP and HTTPS for the site containers. It shares the host's
+  # network namespace on purpose: a VPN client owns the default route, so the
+  # host still reaches the internet while a Docker bridge network no longer
+  # does. Configuration and the full reasoning are in squid.conf.
+  egress-proxy:
+    image: ubuntu/squid:6.6-24.04_edge
+    container_name: egress-proxy
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Helsinki
+    network_mode: host
+    volumes:
+      - ./squid.conf:/etc/squid/squid.conf:ro
+
 networks:
   web-proxy:
     external: true

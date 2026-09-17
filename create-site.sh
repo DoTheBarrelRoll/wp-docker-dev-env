@@ -399,6 +399,15 @@ local domain with wp search-replace.
 EOF
 fi
 
+# The site containers send their outbound HTTP through this, and under a VPN
+# it is the only route they have.
+if ! docker ps --format '{{.Names}}' | grep -qx egress-proxy; then
+    printf '\nWarning: the egress-proxy container is not running, so the site containers\n'
+    printf 'reach nothing outside this machine: no plugin installs, no WP Migrate and no\n'
+    printf 'Composer from WP-CLI. Start it with:\n'
+    printf '  cd traefik && docker compose up -d\n'
+fi
+
 if ! docker ps --format '{{.Names}}' | grep -qx traefik; then
     printf '\nWarning: the traefik container is not running, so the site is not reachable yet.\n'
     printf 'Start it with: cd traefik && docker compose up -d\n'
