@@ -16,12 +16,14 @@ Single sites and multisite networks.
 - **Isolated databases.** One named volume per project, `${SITE_NAME}_db_data`, surviving restarts.
 - **Multisite.** `--multisite` scaffolds a subdomain or subdirectory network, including the router rule, the nginx rewrites and the network install.
 - **Theme bootstrapping.** `setup-theme.sh` clones a theme from `github.com/redandbluefi`, writes its `.env` and `auth.json`, installs dependencies, builds the assets and activates it.
+- **Sites that can be brought up to date.** Every site records what it is in its own `site.conf`, and `./create-site.sh --update` re-renders its configuration from that and the current templates. No question is asked twice, and the diff is shown before anything is written.
 
 ## Contents
 
-- `create-site.sh` — creates a site. `--multisite[=subdomain|subdirectory]` makes it a network.
+- `create-site.sh` — creates a site. `--multisite[=subdomain|subdirectory]` makes it a network, `--update` re-renders an existing one.
 - `setup-theme.sh` — clones a theme from `github.com/redandbluefi` into a site and gets it ready to run.
 - `delete-site.sh` — removes a site, its database volume, its certificate and its Traefik entry.
+- `lib/site.sh` — what a site is made of, and how its project files are rendered. Sourced by all three scripts.
 - `traefik/` — the shared stack: the Traefik reverse proxy and the egress proxy. `dynamic_conf.yaml` and `certs/` are generated and not in version control.
 - `traefik/squid.conf` — the egress proxy, which carries the site containers' outbound HTTP and HTTPS.
 - `traefik/templates/` — everything a new site is built from:
@@ -106,8 +108,58 @@ and offers to add the `/etc/hosts` entry.
 | Mail | `https://mail.my-blog.test` |
 | Debug log | `my-blog/src/wp-content/debug.log` |
 
-Re-running the script on an existing project rewrites its configuration files
-and leaves the database and `src/` alone.
+The answers are written to `my-blog/site.conf`, which is what the site is. Every
+script reads it from then on, and re-running `./create-site.sh` over an existing
+project offers each recorded answer back as the default, so getting a site back
+onto the current templates is a matter of pressing return. Enter `-` to clear an
+optional value.
+
+Re-running the script rewrites the configuration files and leaves the database,
+`.env` and `src/` alone.
+
+## Updating a site
+
+Templates change. A site generated last month does not pick that up by itself,
+so re-render it from its manifest:
+
+```sh
+./create-site.sh --update my-blog            # one site
+./create-site.sh --update --all              # every site
+./create-site.sh --update --all --dry-run    # show the diffs, write nothing
+```
+
+This rewrites `docker-compose.yaml`, `nginx.conf`, the PHP ini files, the
+mu-plugins and `src/composer.json`. It never touches the database volume,
+`.env`, or anything else in `src/`. The diff is printed and confirmed before
+anything is written, which matters for a project whose compose file was edited
+by hand: those edits show up as removals, and you can answer no.
+
+A site created before `site.conf` existed does not have one. The first
+`--update` recovers the values from the files the site already has, the domain
+from `nginx/nginx.conf`, the production domain from `nginx/configs/uploads-proxy.conf`,
+the network type from `src/wp-config.php` and the theme from the checkout under
+`src/wp-content/themes`, shows them, and records them once you agree. A project
+with two theme checkouts cannot be told apart, so fill `THEME_SLUG` in yourself.
+
+To change something about a site, edit its `site.conf` and re-run the update:
+
+```ini
+SITE_NAME=my-blog
+DOMAIN=my-blog.test
+PROD_DOMAIN=example.com
+NETWORK_TYPE=
+THEME_SLUG=eternia
+```
+
+`NETWORK_TYPE` is empty, `subdomain` or `subdirectory`. Changing the domain in
+`site.conf` re-renders the router rule and the server block, but it does not
+reissue the certificate or fix `/etc/hosts`; run `./create-site.sh` for that.
+
+Containers keep the configuration they were created with, so finish with:
+
+```sh
+cd my-blog && docker compose up -d --force-recreate
+```
 
 ## Multisite
 
@@ -144,11 +196,14 @@ On a subdomain network the hostname also needs `127.0.0.1 sub.my-blog.test` in
 ### Converting an existing site
 
 Re-running `create-site.sh` with the flag added turns a single site into a
-network. The database and `src/` are left alone: `wp core multisite-install`
-finds the single site tables already there and adds the network tables and
-constants around them. The opposite is refused, because regenerating a network's
-compose file as a single site would put `WP_HOME` and `WP_SITEURL` back and pin
-every subsite to the main domain.
+network, or set `NETWORK_TYPE` in the site's `site.conf` and run
+`./create-site.sh --update`, which renders the same thing without starting
+anything. The database and `src/` are left alone either way:
+`wp core multisite-install` finds the single site tables already there and adds
+the network tables and constants around them. Going the other way is refused
+during creation, because regenerating a network's compose file as a single site
+would put `WP_HOME` and `WP_SITEURL` back and pin every subsite to the main
+domain.
 
 ### The site URL trade-off
 
@@ -269,10 +324,11 @@ uncommitted and unpushed counts first, so nothing unsaved disappears by accident
 
 ## Configuration notes
 
+- **Where a change belongs.** Anything that should hold for every site goes in `traefik/templates/`, and `./create-site.sh --update --all` carries it to the sites that already exist. Anything true of one site goes in that site's `site.conf`. A file edited directly in a project is overwritten by the next update, which is what the confirmation before writing is for.
 - **PHP version.** Pinned in `traefik/templates/wp-template.yaml` (`wordpress:php8.4-fpm`, `wordpress:cli-php8.4`). Change it there to match the target hosting. WordPress core itself lives in `src/` and is pinned per project by the bind mount, not by the image tag.
 - **Database.** MariaDB 11.8, pinned in the same template. It is the engine the WP-CLI image can talk to: against MySQL 8.0 its MariaDB client rejects the server's self-signed certificate and cannot load `caching_sha2_password`, which breaks every `wp db` command. WordPress connects as the `wordpress` user, the same as in production. The `root` account still exists: `docker compose exec mysql mariadb -uroot -prootpassword wordpress`.
 - **Site URL.** `WP_HOME` and `WP_SITEURL` are defined in the compose file, so a single site stays on its local domain even right after a production database import. `wp search-replace` is still needed for URLs inside post content. A network does not get them, see [Multisite](#multisite).
-- **PHP limits.** 128M uploads, 512M memory and 300s execution time for web requests; 1024M and no time limit for WP-CLI. Edit `php/php-fpm-dev.ini` and `php/php-cli-dev.ini` in the project, or the templates for all future sites.
+- **PHP limits.** 128M uploads, 512M memory and 300s execution time for web requests; 1024M and no time limit for WP-CLI. Edit the templates and run `--update`, or edit `php/php-fpm-dev.ini` and `php/php-cli-dev.ini` in the project for a change that only holds until the next update.
 - **Uploads fallback.** With a production domain configured, a request for an upload that does not exist locally is redirected to production, so a database import does not need the media library. The rule lives in `nginx/configs/uploads-proxy.conf`.
 - **Outbound connections.** Everything the `wordpress`, `wp-setup` and `wp-cli` containers send out goes through `egress-proxy`, see [Outbound connections](#outbound-connections).
 - **Restart policy.** Containers use `restart: "no"`, so nothing comes back after a reboot. Start the projects you are working on with `docker compose up -d`.
@@ -313,7 +369,7 @@ empty `DEV_PROXY_URL=` in the project's `.env` and recreating the containers.
 - **502 from nginx.** The `wordpress` container is not up yet. Check `docker compose logs wordpress`.
 - **Setup container failed.** `docker compose logs wp-setup`. It waits up to two minutes for core files and `wp-config.php`, then gives up.
 - **`docker compose` complains that the env file is missing.** An older Compose does not understand `required: false` on an `env_file` entry. Create an empty `.env` in the project directory, or upgrade Compose.
-- **A container reaches nothing outside the machine.** WP Migrate will not activate, `wp plugin install` hangs, Composer cannot reach packagist, and cURL error 7 fills `debug.log`. Check that the egress proxy is up with `docker ps --filter name=egress-proxy`, and start it with `cd traefik && docker compose up -d`. A site scaffolded before the proxy existed does not know about it yet: re-run `./create-site.sh` for it, which rewrites `docker-compose.yaml` and leaves the database and `src/` alone. See [Outbound connections](#outbound-connections).
+- **A container reaches nothing outside the machine.** WP Migrate will not activate, `wp plugin install` hangs, Composer cannot reach packagist, and cURL error 7 fills `debug.log`. Check that the egress proxy is up with `docker ps --filter name=egress-proxy`, and start it with `cd traefik && docker compose up -d`. A site scaffolded before the proxy existed does not know about it yet: run `./create-site.sh --update <site>` for it, which rewrites `docker-compose.yaml` and leaves the database and `src/` alone. See [Outbound connections](#outbound-connections).
 - **A WP Migrate pull fails with "Unable to overwrite destination file".** The plugin directory it names is not writable by `www-data`. Composer extracts dist archives with the modes stored in the archive, so plugins installed straight from wpackagist land without group write. `setup-theme.sh` fixes this, but a `composer install` run by hand reintroduces it. Repair with:
 
   ```sh

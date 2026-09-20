@@ -7,25 +7,24 @@
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/site.sh
+. "$BASE_DIR/lib/site.sh"
+
 TRAEFIK_DIR="$BASE_DIR/traefik"
 CERT_DIR="$TRAEFIK_DIR/certs"
 DYNAMIC_CONF="$TRAEFIK_DIR/dynamic_conf.yaml"
 
-info() { printf '\n--- %s ---\n' "$1"; }
-die() { printf 'Error: %s\n' "$1" >&2; exit 1; }
+ARG_SITE_NAME="${1:-}"
+[ -n "$ARG_SITE_NAME" ] || die "Usage: $0 <project-directory-name>"
+[[ "$ARG_SITE_NAME" =~ $SITE_NAME_RE ]] || die "'$ARG_SITE_NAME' is not a valid project name."
 
-SITE_NAME="${1:-}"
-[ -n "$SITE_NAME" ] || die "Usage: $0 <project-directory-name>"
-[[ "$SITE_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "'$SITE_NAME' is not a valid project name."
-
-PROJECT_DIR="$BASE_DIR/$SITE_NAME"
+PROJECT_DIR="$BASE_DIR/$ARG_SITE_NAME"
 [ "$PROJECT_DIR" != "$BASE_DIR" ] || die "Refusing to operate on the root directory."
 
-DOMAIN=""
-if [ -f "$PROJECT_DIR/nginx/nginx.conf" ]; then
-    DOMAIN="$(awk '/^[[:space:]]*server_name[[:space:]]/ { gsub(/;/, "", $2); print $2; exit }' \
-        "$PROJECT_DIR/nginx/nginx.conf")"
-fi
+# The domain is only needed for the /etc/hosts line and the confirmation, so a
+# site whose facts cannot be recovered is still removable.
+site_facts_load "$PROJECT_DIR" || site_facts_reset
+SITE_NAME="$ARG_SITE_NAME"
 
 if [ ! -d "$PROJECT_DIR" ] \
     && [ ! -f "$CERT_DIR/$SITE_NAME-cert.pem" ] \

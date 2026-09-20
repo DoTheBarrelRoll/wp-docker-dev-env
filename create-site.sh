@@ -3,26 +3,26 @@
 # Scaffolds a local WordPress site: nginx, PHP-FPM and MariaDB behind Traefik,
 # with a trusted mkcert certificate and a Mailpit inbox.
 #
+# What a site is made of is recorded in its site.conf, and rendering the project
+# files from that manifest is a step of its own, so an existing site can be
+# brought up to the current templates without answering any questions again.
+#
 # Usage: ./create-site.sh [--multisite[=subdomain|subdirectory]]
+#        ./create-site.sh --update <site>... [--dry-run] [--yes]
+#        ./create-site.sh --update --all [--dry-run] [--yes]
 
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/site.sh
+. "$BASE_DIR/lib/site.sh"
+
 TRAEFIK_DIR="$BASE_DIR/traefik"
 TEMPLATE_DIR="$TRAEFIK_DIR/templates"
 CERT_DIR="$TRAEFIK_DIR/certs"
 DYNAMIC_CONF="$TRAEFIK_DIR/dynamic_conf.yaml"
 PROXY_NETWORK="web-proxy"
 WWW_DATA_GID=33
-
-HOSTNAME_RE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
-
-info() { printf '\n--- %s ---\n' "$1"; }
-die() { printf 'Error: %s\n' "$1" >&2; exit 1; }
-
-require_command() {
-    command -v "$1" >/dev/null 2>&1 || die "$1 is required but was not found. $2"
-}
 
 # Reports whether a hostname is already listed in /etc/hosts.
 host_is_mapped() {
@@ -48,31 +48,217 @@ traefik_on_proxy_network() {
 
 # --- Options -----------------------------------------------------------------
 
-NETWORK_TYPE=""
+MODE="create"
+REQUESTED_NETWORK=""
+NETWORK_GIVEN=0
+UPDATE_ALL=0
+DRY_RUN=0
+ASSUME_YES=0
+UPDATE_SITES=()
 
 usage() {
     cat <<'EOF'
 Usage: ./create-site.sh [--multisite[=<type>]]
+       ./create-site.sh --update <site>... [--dry-run] [--yes]
+       ./create-site.sh --update --all [--dry-run] [--yes]
 
   --multisite[=<type>]  Scaffold a WordPress network instead of a single site.
                         <type> is 'subdomain', the default, or 'subdirectory'.
+
+  --update <site>...    Re-render an existing site's docker-compose.yaml,
+                        nginx.conf, PHP ini files, mu-plugins and composer.json
+                        from its site.conf and the current templates. The
+                        database, .env and everything else in src/ are left
+                        alone. A site with no site.conf gets one, recovered
+                        from the files it already has.
+  --update --all        Every site directory that holds a docker-compose.yaml.
+  --dry-run             Show the diff and write nothing.
+  --yes                 Do not ask before writing.
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --multisite) NETWORK_TYPE="subdomain" ;;
-        --multisite=*) NETWORK_TYPE="${1#*=}" ;;
+        --multisite) REQUESTED_NETWORK="subdomain"; NETWORK_GIVEN=1 ;;
+        --multisite=*) REQUESTED_NETWORK="${1#*=}"; NETWORK_GIVEN=1 ;;
+        --update) MODE="update" ;;
+        --all) UPDATE_ALL=1 ;;
+        --dry-run) DRY_RUN=1 ;;
+        --yes | -y) ASSUME_YES=1 ;;
         -h | --help) usage; exit 0 ;;
-        *) usage >&2; die "Unknown option '$1'." ;;
+        -*) usage >&2; die "Unknown option '$1'." ;;
+        *) UPDATE_SITES+=("$1") ;;
     esac
     shift
 done
 
-case "$NETWORK_TYPE" in
+case "$REQUESTED_NETWORK" in
     "" | subdomain | subdirectory) ;;
-    *) die "The network type is 'subdomain' or 'subdirectory', not '$NETWORK_TYPE'." ;;
+    *) die "The network type is 'subdomain' or 'subdirectory', not '$REQUESTED_NETWORK'." ;;
 esac
+
+if [ "$MODE" = "create" ]; then
+    [ "${#UPDATE_SITES[@]}" -eq 0 ] || { usage >&2; die "Site names are only accepted with --update."; }
+    [ "$UPDATE_ALL" -eq 0 ] || { usage >&2; die "--all is only accepted with --update."; }
+    [ "$DRY_RUN" -eq 0 ] || { usage >&2; die "--dry-run is only accepted with --update."; }
+else
+    [ "$NETWORK_GIVEN" -eq 0 ] \
+        || die "--multisite is for creating a site. Set NETWORK_TYPE in the site's site.conf and re-run --update."
+fi
+
+site_templates_check "$TEMPLATE_DIR"
+
+# --- Update ------------------------------------------------------------------
+
+# Copies the render over the project and drops the managed files it no longer
+# produces. Reports the files it could not write rather than reaching for sudo.
+apply_render() {
+    local staged="$1" project_dir="$2"
+    local failed=() rel
+
+    for rel in "${SITE_RENDERED_FILES[@]}"; do
+        mkdir -p "$project_dir/$(dirname "$rel")"
+        if cp "$staged/$rel" "$project_dir/$rel" 2>/dev/null; then
+            chgrp "$WWW_DATA_GID" "$project_dir/$rel" 2>/dev/null || true
+            chmod g+rw "$project_dir/$rel" 2>/dev/null || true
+        else
+            failed+=("$rel")
+        fi
+    done
+
+    site_prune_stale "$project_dir" || failed+=("(removing a file this render no longer produces)")
+
+    if [ "${#failed[@]}" -ne 0 ]; then
+        warn "Could not write: ${failed[*]}. Fix the ownership with: sudo chown -R $USER:$WWW_DATA_GID $project_dir"
+        return 1
+    fi
+    return 0
+}
+
+# Prints a unified diff of the render against the project. Returns 1 when they
+# already match.
+render_diff() {
+    local staged="$1" project_dir="$2"
+    local rel changed=0 left
+
+    while IFS= read -r rel; do
+        left="$project_dir/$rel"
+        if [ -e "$staged/$rel" ]; then
+            if [ -e "$left" ]; then
+                diff -u --label "$rel (now)" --label "$rel (rendered)" "$left" "$staged/$rel" || changed=1
+            else
+                printf '+++ %s (new file)\n' "$rel"
+                changed=1
+            fi
+        elif [ -e "$left" ]; then
+            printf -- '--- %s (no longer generated, would be removed)\n' "$rel"
+            changed=1
+        fi
+    done < <(site_managed_files)
+
+    [ "$changed" -eq 1 ] || return 1
+    return 0
+}
+
+update_site() {
+    local site="$1"
+    local project_dir="$BASE_DIR/$site"
+
+    info "$site"
+    [ -d "$project_dir" ] || { warn "$project_dir does not exist, skipping."; return 1; }
+
+    site_facts_load "$project_dir" \
+        || { warn "$site has no site.conf and nothing to recover one from, skipping."; return 1; }
+
+    # The database volume and every container name are built from SITE_NAME, so
+    # a manifest that disagrees with its own directory is not something to
+    # guess about: rendering either value would orphan something.
+    if [ "$SITE_NAME" != "$site" ]; then
+        warn "$site/site.conf says SITE_NAME=$SITE_NAME. Fix it to match the directory, skipping."
+        return 1
+    fi
+
+    if [ "$SITE_FACTS_INFERRED" -eq 1 ]; then
+        printf 'No site.conf. Recovered from the files this site already has:\n'
+        site_facts_print
+        if [ -z "$THEME_SLUG" ]; then
+            printf '\nThe theme slug could not be recovered: there is no checkout under\n'
+            printf 'src/wp-content/themes, or there is more than one. Fill it in afterwards\n'
+            printf 'if this site has a project theme.\n'
+        fi
+        if [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+            local reply=""
+            printf '\n'
+            read -r -p "Record this as $site/site.conf? [Y/n] " reply || true
+            [[ ! "$reply" =~ ^[Nn]$ ]] || { warn "Skipping $site."; return 1; }
+        fi
+    fi
+
+    site_facts_check || { warn "Skipping $site."; return 1; }
+
+    local staged
+    staged="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$staged'" RETURN
+
+    site_render "$staged" "$TEMPLATE_DIR"
+
+    if ! render_diff "$staged" "$project_dir"; then
+        echo "Already matches the current templates."
+        if [ "$DRY_RUN" -eq 0 ] && [ "$SITE_FACTS_INFERRED" -eq 1 ]; then
+            site_facts_write "$project_dir"
+            echo "Recorded $site/site.conf."
+        fi
+        return 0
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo
+        echo "Dry run, nothing written."
+        return 0
+    fi
+
+    if [ "$ASSUME_YES" -eq 0 ]; then
+        local reply=""
+        printf '\n'
+        read -r -p "Write these changes to $site? [y/N] " reply || true
+        [[ "$reply" =~ ^[Yy]$ ]] || { echo "Skipped."; return 1; }
+    fi
+
+    site_facts_write "$project_dir"
+    site_ensure_env "$project_dir"
+    apply_render "$staged" "$project_dir" || true
+    echo "Updated. Recreate the containers with:"
+    echo "  cd $site && docker compose up -d --force-recreate"
+    return 0
+}
+
+if [ "$MODE" = "update" ]; then
+    if [ "$UPDATE_ALL" -eq 1 ]; then
+        [ "${#UPDATE_SITES[@]}" -eq 0 ] || die "Name sites or pass --all, not both."
+        while IFS= read -r compose; do
+            site="$(basename "$(dirname "$compose")")"
+            [ "$site" != "traefik" ] || continue
+            UPDATE_SITES+=("$site")
+        done < <(find "$BASE_DIR" -mindepth 2 -maxdepth 2 -name docker-compose.yaml | sort)
+    fi
+    [ "${#UPDATE_SITES[@]}" -ne 0 ] || { usage >&2; die "Name a site to update, or pass --all."; }
+
+    updated=0
+    skipped=0
+    for site in "${UPDATE_SITES[@]}"; do
+        [[ "$site" =~ $SITE_NAME_RE ]] || { warn "'$site' is not a valid project name, skipping."; skipped=$((skipped + 1)); continue; }
+        if update_site "$site"; then
+            updated=$((updated + 1))
+        else
+            skipped=$((skipped + 1))
+        fi
+    done
+
+    printf '\n--- Done ---\n\n'
+    printf '%s site(s) handled, %s skipped.\n' "$updated" "$skipped"
+    exit 0
+fi
 
 # --- Prerequisites -----------------------------------------------------------
 
@@ -83,11 +269,6 @@ docker info >/dev/null 2>&1 || die "The Docker daemon is not reachable."
 
 CA_ROOT="$(mkcert -CAROOT)"
 [ -f "$CA_ROOT/rootCA.pem" ] || die "The mkcert local CA is missing. Run 'mkcert -install' once, then try again."
-
-for template in wp-template.yaml nginx.conf multisite-subdirectory.conf composer.json \
-    php-fpm-dev.ini php-cli-dev.ini mu-dev-mail.php mu-dev-multisite.php; do
-    [ -f "$TEMPLATE_DIR/$template" ] || die "Template $TEMPLATE_DIR/$template is missing."
-done
 
 if [ ! -f "$DYNAMIC_CONF" ]; then
     info "Creating $DYNAMIC_CONF"
@@ -108,16 +289,28 @@ fi
 
 # --- Input -------------------------------------------------------------------
 
-SITE_NAME=""
-read -r -p "Enter project directory name (e.g., my-blog): " SITE_NAME || true
-SITE_NAME="${SITE_NAME,,}"
-[[ "$SITE_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
+# An existing site answers most of this itself, so re-running over one is a
+# matter of pressing return.
+read -r -p "Enter project directory name (e.g., my-blog): " reply || true
+SITE_NAME="${reply,,}"
+[[ "$SITE_NAME" =~ $SITE_NAME_RE ]] \
     || die "The project name may only contain a-z, 0-9, '-' and '_', and must start with a letter or digit."
 
-DOMAIN=""
-read -r -p "Enter domain (e.g., my-blog.test): " DOMAIN || true
+PROJECT_DIR="$BASE_DIR/$SITE_NAME"
+WANTED_NAME="$SITE_NAME"
+site_facts_load "$PROJECT_DIR" || site_facts_reset
+SITE_NAME="$WANTED_NAME"
+
+if [ "$SITE_FACTS_INFERRED" -eq 1 ]; then
+    printf '\n%s exists but has no site.conf. Recovered from its files:\n' "$SITE_NAME"
+    site_facts_print
+fi
+
+reply=""
+read -r -p "Enter domain (e.g., my-blog.test)${DOMAIN:+ [$DOMAIN]}: " reply || true
+DOMAIN="${reply:-$DOMAIN}"
 DOMAIN="${DOMAIN,,}"
-[[ "$DOMAIN" =~ $HOSTNAME_RE ]] || die "'$DOMAIN' does not look like a hostname."
+[[ "$DOMAIN" =~ $SITE_HOSTNAME_RE ]] || die "'$DOMAIN' does not look like a hostname."
 case "$DOMAIN" in
     *.test) ;;
     *) printf 'Note: .test is reserved for local use (RFC 6761) and can never be registered.\n'
@@ -125,36 +318,34 @@ case "$DOMAIN" in
        printf 'the /etc/hosts entry keeps traffic off their server.\n' ;;
 esac
 
-PROD_DOMAIN=""
-read -r -p "Enter production domain to fall back to for uploads (optional): " PROD_DOMAIN || true
+# A recorded value is offered back, and "-" is how you take one away.
+reply=""
+read -r -p "Enter production domain to fall back to for uploads (optional, '-' to clear)${PROD_DOMAIN:+ [$PROD_DOMAIN]}: " reply || true
+PROD_DOMAIN="${reply:-$PROD_DOMAIN}"
+[ "$PROD_DOMAIN" != "-" ] || PROD_DOMAIN=""
 PROD_DOMAIN="${PROD_DOMAIN,,}"
 PROD_DOMAIN="${PROD_DOMAIN#http://}"
 PROD_DOMAIN="${PROD_DOMAIN#https://}"
 PROD_DOMAIN="${PROD_DOMAIN%%/*}"
-if [ -n "$PROD_DOMAIN" ]; then
-    [[ "$PROD_DOMAIN" =~ $HOSTNAME_RE ]] || die "'$PROD_DOMAIN' does not look like a hostname."
-fi
 
-THEME_SLUG=""
-read -r -p "Enter theme repository slug from github.com/redandbluefi (optional, e.g. eternia): " THEME_SLUG || true
+reply=""
+read -r -p "Enter theme repository slug from github.com/redandbluefi (optional, '-' to clear)${THEME_SLUG:+ [$THEME_SLUG]}: " reply || true
+THEME_SLUG="${reply:-$THEME_SLUG}"
+[ "$THEME_SLUG" != "-" ] || THEME_SLUG=""
 THEME_SLUG="${THEME_SLUG,,}"
 if [ -n "$THEME_SLUG" ]; then
-    [[ "$THEME_SLUG" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "'$THEME_SLUG' is not a valid repository slug."
     [ -x "$BASE_DIR/setup-theme.sh" ] || die "setup-theme.sh is missing or not executable."
 fi
 
-PROJECT_DIR="$BASE_DIR/$SITE_NAME"
-
 # Regenerating a network as a single site would put WP_HOME and WP_SITEURL back
 # and pin every subsite to the main domain.
-if [ -z "$NETWORK_TYPE" ] && [ -f "$PROJECT_DIR/src/wp-config.php" ] \
-    && grep -qE "define\( *'MULTISITE', *true" "$PROJECT_DIR/src/wp-config.php"; then
-    existing="subdirectory"
-    if grep -qE "define\( *'SUBDOMAIN_INSTALL', *true" "$PROJECT_DIR/src/wp-config.php"; then
-        existing="subdomain"
-    fi
-    die "$SITE_NAME is already a $existing network. Re-run with --multisite=$existing."
+if [ "$NETWORK_GIVEN" -eq 1 ]; then
+    NETWORK_TYPE="$REQUESTED_NETWORK"
+elif [ -n "$NETWORK_TYPE" ]; then
+    die "$SITE_NAME is already a $NETWORK_TYPE network. Re-run with --multisite=$NETWORK_TYPE."
 fi
+
+site_facts_validate
 
 if [ -e "$PROJECT_DIR" ]; then
     printf '\n%s already exists.\n' "$PROJECT_DIR"
@@ -166,107 +357,24 @@ if [ -e "$PROJECT_DIR" ]; then
     [[ "$reply" =~ ^[Yy]$ ]] || die "Aborted."
 fi
 
-# --- Network type ------------------------------------------------------------
-
-# A single site pins its URL with WP_HOME and WP_SITEURL. A network cannot: it
-# reads every site URL from the network tables, so those two lines are dropped
-# from the compose file and WP-CLI writes the multisite constants into
-# src/wp-config.php when it installs the network instead.
-SERVER_NAME="$DOMAIN"
-TRAEFIK_RULE="Host(\`$DOMAIN\`)"
-IS_INSTALLED="is-installed"
-CORE_INSTALL="install"
-PLUGIN_ACTIVATE="plugin activate"
-COMPOSE_FILTER=()
-
-if [ -n "$NETWORK_TYPE" ]; then
-    COMPOSE_FILTER=(-e "/define( 'WP_HOME'/d" -e "/define( 'WP_SITEURL'/d")
-    IS_INSTALLED="is-installed --network"
-    CORE_INSTALL="multisite-install"
-    PLUGIN_ACTIVATE="plugin activate --network"
-fi
-
-if [ "$NETWORK_TYPE" = "subdomain" ]; then
-    CORE_INSTALL="multisite-install --subdomains"
-    SERVER_NAME="$DOMAIN *.$DOMAIN"
-    # Traefik v3 matches HostRegexp with a Go regular expression. The dots are
-    # literal, written as [.] so that no backslash has to survive YAML, and the
-    # anchor is written as $$, which is how Compose escapes a literal $.
-    TRAEFIK_RULE="Host(\`$DOMAIN\`) || HostRegexp(\`^.+[.]${DOMAIN//./[.]}\$\$\`)"
-fi
-
 # --- Project files -----------------------------------------------------------
 
-info "Creating project directories"
-mkdir -p "$PROJECT_DIR/src/wp-content/mu-plugins" "$PROJECT_DIR/nginx/configs" "$PROJECT_DIR/php"
+info "Recording $SITE_NAME/site.conf"
+site_facts_write "$PROJECT_DIR"
+site_facts_print
 
-info "Generating nginx configuration"
-if [ -n "$PROD_DOMAIN" ]; then
-    sed -e "s|\${PROD_URL}|$PROD_DOMAIN|g" \
-        "$TEMPLATE_DIR/uploads-proxy.conf" > "$PROJECT_DIR/nginx/configs/uploads-proxy.conf"
-    UPLOADS_FALLBACK="include /etc/nginx/custom_includes/uploads-proxy.conf;"
-else
-    rm -f "$PROJECT_DIR/nginx/configs/uploads-proxy.conf"
-    UPLOADS_FALLBACK="return 404;"
-fi
-if [ "$NETWORK_TYPE" = "subdirectory" ]; then
-    cp "$TEMPLATE_DIR/multisite-subdirectory.conf" "$PROJECT_DIR/nginx/configs/multisite-subdirectory.conf"
-    NGINX_FILTER=(-e "s|\${MULTISITE_REWRITES}|include /etc/nginx/custom_includes/multisite-subdirectory.conf;|")
-else
-    rm -f "$PROJECT_DIR/nginx/configs/multisite-subdirectory.conf"
-    NGINX_FILTER=(-e "/\${MULTISITE_REWRITES}/d")
-fi
+info "Rendering the project files"
+site_render "$PROJECT_DIR" "$TEMPLATE_DIR"
+site_prune_stale "$PROJECT_DIR" || warn "Could not remove a file this render no longer produces."
+printf '%s\n' "${SITE_RENDERED_FILES[@]}" | sed 's/^/  /'
 
-sed "${NGINX_FILTER[@]}" \
-    -e "s|\${SERVER_NAME}|$SERVER_NAME|g" \
-    -e "s|\${UPLOADS_FALLBACK}|$UPLOADS_FALLBACK|g" \
-    "$TEMPLATE_DIR/nginx.conf" > "$PROJECT_DIR/nginx/nginx.conf"
-
-info "Generating PHP configuration"
-cp "$TEMPLATE_DIR/php-fpm-dev.ini" "$PROJECT_DIR/php/php-fpm-dev.ini"
-cp "$TEMPLATE_DIR/php-cli-dev.ini" "$PROJECT_DIR/php/php-cli-dev.ini"
-
-info "Installing the mu-plugins"
-cp "$TEMPLATE_DIR/mu-dev-mail.php" "$PROJECT_DIR/src/wp-content/mu-plugins/dev-mail.php"
-if [ -n "$NETWORK_TYPE" ]; then
-    cp "$TEMPLATE_DIR/mu-dev-multisite.php" "$PROJECT_DIR/src/wp-content/mu-plugins/dev-multisite.php"
-else
-    rm -f "$PROJECT_DIR/src/wp-content/mu-plugins/dev-multisite.php"
-fi
-
-# Holds secrets once a project is under way, so an existing file is never
-# rewritten. The compose file marks it optional, and a site that needs nothing
-# from it simply leaves it as comments.
 info "Preparing .env"
 if [ -f "$PROJECT_DIR/.env" ]; then
     echo "Keeping the existing .env."
 else
-    cat > "$PROJECT_DIR/.env" <<'EOF'
-# Environment variables for this site, passed to PHP-FPM and to WP-CLI. A theme
-# or plugin reads them with getenv(). One KEY=value per line, no quotes needed:
-#
-#   SOME_API_KEY=xxxx
-#
-# This file stays outside src/, so nginx never serves it, and it is not in
-# version control. After editing it run
-#
-#   docker compose up -d --force-recreate wordpress
-#
-# because a running container keeps the environment it was created with.
-EOF
-    chmod 600 "$PROJECT_DIR/.env"
+    site_ensure_env "$PROJECT_DIR"
     echo "Created."
 fi
-
-info "Generating docker-compose.yaml"
-sed "${COMPOSE_FILTER[@]}" \
-    -e "s/\${SITE_NAME}/$SITE_NAME/g" \
-    -e "s/\${DOMAIN}/$DOMAIN/g" \
-    -e "s@\${TRAEFIK_RULE}@$TRAEFIK_RULE@g" \
-    -e "s@\${IS_INSTALLED}@$IS_INSTALLED@g" \
-    -e "s@\${CORE_INSTALL}@$CORE_INSTALL@g" \
-    -e "s@\${PLUGIN_ACTIVATE}@$PLUGIN_ACTIVATE@g" \
-    "$TEMPLATE_DIR/wp-template.yaml" > "$PROJECT_DIR/docker-compose.yaml"
 
 info "Generating SSL certificates"
 mkcert -cert-file "$CERT_DIR/$SITE_NAME-cert.pem" \
@@ -284,9 +392,6 @@ EOF
 fi
 
 # --- Composer ----------------------------------------------------------------
-
-info "Preparing composer.json"
-sed -e "s/\${SITE_NAME}/$SITE_NAME/g" "$TEMPLATE_DIR/composer.json" > "$PROJECT_DIR/src/composer.json"
 
 if [ -f "$TEMPLATE_DIR/auth.json" ]; then
     require_command composer "See https://getcomposer.org/download/"
@@ -359,10 +464,12 @@ Admin      https://$DOMAIN/wp-admin  (admin / password)
 Mail       https://mail.$DOMAIN
 Debug log  $SITE_NAME/src/wp-content/debug.log
 Env vars   $SITE_NAME/.env
+Manifest   $SITE_NAME/site.conf
 
 WP-CLI     cd $SITE_NAME && docker compose run --rm wp-cli wp <command>
 Logs       cd $SITE_NAME && docker compose logs -f
 Stop       cd $SITE_NAME && docker compose down
+Update     ./create-site.sh --update $SITE_NAME
 Remove     ./delete-site.sh $SITE_NAME
 EOF
 
