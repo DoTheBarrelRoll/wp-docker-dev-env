@@ -21,8 +21,40 @@ TRAEFIK_DIR="$BASE_DIR/traefik"
 TEMPLATE_DIR="$TRAEFIK_DIR/templates"
 CERT_DIR="$TRAEFIK_DIR/certs"
 DYNAMIC_CONF="$TRAEFIK_DIR/dynamic_conf.yaml"
+CA_BUNDLE="$CERT_DIR/dev-ca-bundle.crt"
 PROXY_NETWORK="web-proxy"
 WWW_DATA_GID=33
+
+# Writes the CA bundle the site containers verify HTTPS against: the host's
+# public roots with the mkcert development CA appended. Site certificates are
+# signed by that CA, and without it in the bundle one local site calling another
+# gets "unable to get local issuer certificate" instead of a response. The file
+# is rewritten whenever either source is newer, and a missing piece is a warning
+# rather than an error: only calls between local sites depend on it.
+ensure_ca_bundle() {
+    local system_bundle="/etc/ssl/certs/ca-certificates.crt" ca_root
+
+    command -v mkcert >/dev/null 2>&1 \
+        || { warn "mkcert was not found, so $CA_BUNDLE cannot be built."; return 1; }
+    ca_root="$(mkcert -CAROOT)"
+    [ -f "$ca_root/rootCA.pem" ] \
+        || { warn "The mkcert local CA is missing. Run 'mkcert -install' once."; return 1; }
+    [ -f "$system_bundle" ] \
+        || { warn "$system_bundle is missing, so $CA_BUNDLE cannot be built."; return 1; }
+
+    if [ -f "$CA_BUNDLE" ] \
+        && [ ! "$system_bundle" -nt "$CA_BUNDLE" ] \
+        && [ ! "$ca_root/rootCA.pem" -nt "$CA_BUNDLE" ]; then
+        return 0
+    fi
+
+    mkdir -p "$CERT_DIR"
+    cat "$system_bundle" "$ca_root/rootCA.pem" > "$CA_BUNDLE.tmp"
+    mv "$CA_BUNDLE.tmp" "$CA_BUNDLE"
+    chmod 644 "$CA_BUNDLE"
+    echo "Wrote $CA_BUNDLE."
+    return 0
+}
 
 # Reports whether a hostname is already listed in /etc/hosts.
 host_is_mapped() {
@@ -234,6 +266,8 @@ update_site() {
 }
 
 if [ "$MODE" = "update" ]; then
+    ensure_ca_bundle || true
+
     if [ "$UPDATE_ALL" -eq 1 ]; then
         [ "${#UPDATE_SITES[@]}" -eq 0 ] || die "Name sites or pass --all, not both."
         while IFS= read -r compose; do
@@ -269,6 +303,8 @@ docker info >/dev/null 2>&1 || die "The Docker daemon is not reachable."
 
 CA_ROOT="$(mkcert -CAROOT)"
 [ -f "$CA_ROOT/rootCA.pem" ] || die "The mkcert local CA is missing. Run 'mkcert -install' once, then try again."
+
+ensure_ca_bundle || true
 
 if [ ! -f "$DYNAMIC_CONF" ]; then
     info "Creating $DYNAMIC_CONF"
