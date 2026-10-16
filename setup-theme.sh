@@ -9,41 +9,40 @@
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/site.sh
+. "$BASE_DIR/lib/site.sh"
+
 TEMPLATE_DIR="$BASE_DIR/traefik/templates"
 LICENSES_FILE="$TEMPLATE_DIR/licenses.env"
 GITHUB_ORG="redandbluefi"
 WWW_DATA_GID=33
 
-info() { printf '\n--- %s ---\n' "$1"; }
-warn() { printf 'Warning: %s\n' "$1" >&2; }
-die() { printf 'Error: %s\n' "$1" >&2; exit 1; }
-
-require_command() {
-    command -v "$1" >/dev/null 2>&1 || die "$1 is required but was not found. $2"
-}
-
 # --- Arguments ---------------------------------------------------------------
 
-SITE_NAME="${1:-}"
-THEME_SLUG="${2:-}"
-DOMAIN="${3:-}"
+ARG_SITE_NAME="${1:-}"
+ARG_THEME_SLUG="${2:-}"
+ARG_DOMAIN="${3:-}"
 
-[ -n "$SITE_NAME" ] && [ -n "$THEME_SLUG" ] \
+[ -n "$ARG_SITE_NAME" ] && [ -n "$ARG_THEME_SLUG" ] \
     || die "Usage: $0 <project-directory-name> <theme-slug> [domain]"
-[[ "$SITE_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "'$SITE_NAME' is not a valid project name."
-[[ "$THEME_SLUG" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "'$THEME_SLUG' is not a valid repository slug."
+# Checked before either one is used to build a path.
+[[ "$ARG_SITE_NAME" =~ $SITE_NAME_RE ]] || die "'$ARG_SITE_NAME' is not a valid project name."
+[[ "$ARG_THEME_SLUG" =~ $SITE_THEME_SLUG_RE ]] || die "'$ARG_THEME_SLUG' is not a valid repository slug."
 
-PROJECT_DIR="$BASE_DIR/$SITE_NAME"
+PROJECT_DIR="$BASE_DIR/$ARG_SITE_NAME"
 [ -d "$PROJECT_DIR" ] || die "$PROJECT_DIR does not exist. Create the site first with ./create-site.sh."
+
+# The site's own facts, so the domain does not have to be passed in or read back
+# out of the generated nginx.conf. The arguments still win where they are given.
+site_facts_load "$PROJECT_DIR" || site_facts_reset
+SITE_NAME="$ARG_SITE_NAME"
+THEME_SLUG="$ARG_THEME_SLUG"
+[ -z "$ARG_DOMAIN" ] || DOMAIN="$ARG_DOMAIN"
+[ -n "$DOMAIN" ] || die "Could not read the local domain from $ARG_SITE_NAME. Pass it as the third argument."
+site_facts_validate
 
 THEMES_DIR="$PROJECT_DIR/src/wp-content/themes"
 THEME_DIR="$THEMES_DIR/$THEME_SLUG"
-
-if [ -z "$DOMAIN" ] && [ -f "$PROJECT_DIR/nginx/nginx.conf" ]; then
-    DOMAIN="$(awk '/^[[:space:]]*server_name[[:space:]]/ { gsub(/;/, "", $2); print $2; exit }' \
-        "$PROJECT_DIR/nginx/nginx.conf")"
-fi
-[ -n "$DOMAIN" ] || die "Could not read the local domain from the project. Pass it as the third argument."
 
 SITE_URL="https://$DOMAIN"
 
@@ -293,12 +292,17 @@ else
     fi
 fi
 
+# This script is where a site's theme slug is known first-hand, so it is the
+# one that records it.
+site_facts_write "$PROJECT_DIR"
+
 cat <<EOF
 
 --- Theme ready ---
 
 Theme      $THEME_DIR
 Proxy URL  $SITE_URL
+Manifest   $SITE_NAME/$SITE_MANIFEST
 Watch      cd $SITE_NAME/src/wp-content/themes/$THEME_SLUG && pnpm run dev
 EOF
 

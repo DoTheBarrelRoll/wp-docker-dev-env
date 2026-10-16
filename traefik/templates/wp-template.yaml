@@ -104,6 +104,7 @@ services:
     volumes:
       - ./src:/var/www/html
       - ./php/php-fpm-dev.ini:/usr/local/etc/php/conf.d/zz-dev.ini:ro
+      - ../traefik/certs/dev-ca-bundle.crt:/usr/local/share/ca-certificates/dev-ca-bundle.crt:ro
     networks:
       - wp-internal
     restart: "no"
@@ -173,6 +174,7 @@ services:
     volumes:
       - ./src:/var/www/html
       - ./php/php-cli-dev.ini:/usr/local/etc/php/conf.d/zz-dev.ini:ro
+      - ../traefik/certs/dev-ca-bundle.crt:/usr/local/share/ca-certificates/dev-ca-bundle.crt:ro
     networks:
       - wp-internal
     restart: "no"
@@ -208,6 +210,7 @@ services:
     volumes:
       - ./src:/var/www/html
       - ./php/php-cli-dev.ini:/usr/local/etc/php/conf.d/zz-dev.ini:ro
+      - ../traefik/certs/dev-ca-bundle.crt:/usr/local/share/ca-certificates/dev-ca-bundle.crt:ro
     networks:
       - wp-internal
 

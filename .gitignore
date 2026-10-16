@@ -3,6 +3,7 @@
 # traefik/ stay tracked.
 /*/
 !/traefik/
+!/lib/
 
 # Secrets and generated state
 *.pem
